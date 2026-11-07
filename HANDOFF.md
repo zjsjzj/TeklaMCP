@@ -70,6 +70,8 @@
 - ✅ 建模/组件工具已实现并注册：`tekla_create_parts`、`tekla_create_components`、
   `tekla_modify_parts`、`tekla_delete_objects`。全部「先预览、再 `confirm=True`」，
   批量插入后一次 `CommitChanges()` 并回查 GUID。
+- ✅ 组件类层次已处理：系统节点走 `Connection`/`Detail`，自定义组件走 `Component`；
+  未指定 `kind` 时按编号自动排序逐个尝试（`Insert` 失败不写模型）。
 - ✅ 参数层覆盖：坐标四种写法（`"x,y,z"`/`"(x,y,z)"`/数组/对象）、
   中文构件别名、`Position` 平面/旋转/深度三向偏移、组件属性与属性文件。
 - ✅ 21 个单元测试通过（`python -m unittest discover -s tests`），

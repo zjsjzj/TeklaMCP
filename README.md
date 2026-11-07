@@ -181,8 +181,14 @@ python -m venv .venv
 
 ```json
 [{"primary_guid": "<柱的 GUID>", "secondary_guids": "<梁的 GUID>",
-  "number": 1014, "point": "0,0,6000", "attributes": {"d": "12"}}]
+  "number": 1014, "kind": "connection", "point": "0,0,6000",
+  "attributes": {"d": "12"}}]
 ```
+
+`kind` 选 `connection`（系统节点，默认）/ `detail`（系统细部）/ `component`（自定义组件）；
+留空为 `auto`，会按编号在 `Connection`、`Detail`、`Component` 之间逐个尝试。
+系统节点必须用 `Connection`/`Detail` 类，自定义组件才用 `Component`——这是 Tekla
+公开 API 的类层次，混用会静默 `Insert` 失败。
 
 返回的每条 `created_items[].guid` 可直接喂给 `tekla_get_object_details`、
 `tekla_modify_parts`、`tekla_delete_objects`，或 `tekla_create_drawings` 出图。
