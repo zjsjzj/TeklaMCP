@@ -1,0 +1,19 @@
+{
+  "_说明": "Cline (VS Code 扩展) 配置：%APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev\\settings\\cline_mcp_settings.json 。比 Claude Desktop 多三个字段 disabled / autoApprove / timeout。",
+  "mcpServers": {
+    "tekla": {
+      "command": "<安装目录>\\.venv\\Scripts\\python.exe",
+      "args": [
+        "<安装目录>\\tekla_server.py"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONNET_RUNTIME": "netfx",
+        "TEKLA_BIN": "C:\\Program Files\\Tekla Structures\\2026.0\\bin"
+      },
+      "disabled": false,
+      "autoApprove": [],
+      "timeout": 60
+    }
+  }
+}

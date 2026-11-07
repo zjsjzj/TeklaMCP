@@ -1,0 +1,18 @@
+{
+  "_说明": "WorkBuddy AI 的配置文件：C:\\Users\\<用户名>\\.workbuddy-ai\\mcp.json 。把下面 <...> 换成你机器上的真实路径，或直接运行 install.ps1 -Client workbuddy 自动生成。",
+  "mcpServers": {
+    "tekla": {
+      "type": "stdio",
+      "command": "<安装目录>\\.venv\\Scripts\\python.exe",
+      "args": [
+        "<安装目录>\\tekla_server.py"
+      ],
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONNET_RUNTIME": "netfx",
+        "TEKLA_BIN": "C:\\Program Files\\Tekla Structures\\2026.0\\bin",
+        "TEKLA_MCP_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}

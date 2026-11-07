@@ -1,0 +1,6 @@
+# Tekla MCP Server 依赖
+# 实测可用组合：Python 3.13.14 + pythonnet 3.2.1 + mcp 2.3.0 + openpyxl 3.1.5
+# tekla_server.py 同时兼容 mcp 1.x (FastMCP) 与 2.x (MCPServer)
+pythonnet>=3.0.5
+mcp>=1.2.0
+openpyxl>=3.1.0
