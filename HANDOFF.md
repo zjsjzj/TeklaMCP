@@ -77,6 +77,9 @@
   无需 Windows/Tekla 即可回归参数校验、插入、提交、修改、删除回查。
 - ⚠️ 建模工具**尚未在真实 Tekla 模型上跑过**（本机不具备 Tekla 环境），
   首次使用请先 `python demo_modeling.py` 预览，再加 `--confirm` 实跑。
+- ✅ 远程调试通道：`tools/tekla_remote_bridge.py`（Windows，需 token）+
+  `tools/remote_relay.py`（代理侧中继）。Windows 主动轮询，不用开入站端口；
+  远程代理通过中继调用 MCP 工具，方便在没有交互式客户端的机器上做真实模型回归。
 
 ---
 

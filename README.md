@@ -462,7 +462,13 @@ MCP 客户端 --stdio--> MCP Server (net8) --IPC--> Bridge.exe (Tekla 内) --> T
 | `format_json.py` | 安装脚本用来整理生成的配置文件 |
 | `INSTALL.md` | 安装说明与常见问题 |
 | `tests/` | 建模工具单元测试（仿真 Tekla 运行时，无需 Windows） |
+| `tools/tekla_remote_bridge.py` | Windows 侧远程桥：把 Tekla 工具临时暴露给局域网/中继（需 `--token`） |
+| `tools/remote_relay.py` | 代理侧中继：配合 Windows 桥实现「远程代理直接操作 Tekla」 |
 | `demo_modeling.py` | 在真实 Tekla 上跑一遍建模回归的小脚本 |
 | `config/` | 三种客户端的配置模板 |
 | `requirements.txt` | 依赖清单 |
 | `export/` | 运行后自动创建的 BOM 输出目录（CSV / XLSX） |
+
+> 远程调试：`tools/` 下的两个脚本只用于让另一台机器上的代理临时操作 Tekla。
+> Windows 侧桥必须带随机 `--token`，默认不监听时什么也不做；用完 `Ctrl+C` 关闭。
+> 不要长期挂在无人值守的机器上。
