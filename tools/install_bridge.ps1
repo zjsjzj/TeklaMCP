@@ -9,7 +9,7 @@
 #>
 param(
     [string]$Relay = "http://10.10.10.20:8765",
-    [string]$Token = "xsPb5E2d-GVixSap2-9T4vHx",
+    [string]$Token = "",
     [string]$Python = "C:\Users\VS\AppData\Local\Programs\Python\Python315\python.exe",
     [string]$InstallDir = "$env:LOCALAPPDATA\TeklaMCP-agent",
     [string]$Branch = "feat/modeling-tools"
@@ -17,6 +17,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not $Token) {
+    throw "必须提供 -Token（由代理提供），不要把 token 提交到仓库"
+}
 if (-not (Test-Path $Python)) {
     throw "找不到 Python：$Python；用 -Python <路径> 指定装好 pythonnet/mcp 的解释器"
 }
