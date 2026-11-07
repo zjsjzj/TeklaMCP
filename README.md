@@ -95,10 +95,10 @@ python -m venv .venv
 
 | 工具 | 作用 | 状态 |
 |---|---|---|
-| `tekla_create_parts` | 批量创建梁/柱/折梁/多边形板/墙板/基础（JSON 数组，单次 50 条） | 单测通过；待真实模型回归 |
-| `tekla_create_components` | 插入 Tekla 组件（连接/节点/细部），把主次构件连起来 | 单测通过；待真实模型回归 |
-| `tekla_modify_parts` | 批量改规格/材质/等级/名称/表面处理与位置偏移 | 单测通过 |
-| `tekla_delete_objects` | 按 GUID 删除对象（先预览，`confirm=True` 才删） | 单测通过 |
+| `tekla_create_parts` | 批量创建梁/柱/折梁/多边形板/墙板/基础（JSON 数组，单次 50 条） | ✅ 2026-11-08 真实模型验证 |
+| `tekla_create_components` | 插入 Tekla 组件（连接/节点/细部），把主次构件连起来 | ✅ 2026-11-08 真实模型验证（1014） |
+| `tekla_modify_parts` | 批量改规格/材质/等级/名称/表面处理与位置偏移 | ✅ 2026-11-08 真实模型验证 |
+| `tekla_delete_objects` | 按 GUID 删除对象（先预览，`confirm=True` 才删） | ✅ 2026-11-08 真实模型验证 |
 
 > 建模工具按 Tekla Open API 2026 公开接口实现：`Beam`/`PolyBeam`/`ContourPlate`、
 > `Position` 三向偏移、`Component` + `ComponentInput`。写操作一律「先预览、再确认」，
@@ -181,14 +181,15 @@ python -m venv .venv
 
 ```json
 [{"primary_guid": "<柱的 GUID>", "secondary_guids": "<梁的 GUID>",
-  "number": 1014, "kind": "connection", "point": "0,0,6000",
-  "attributes": {"d": "12"}}]
+  "number": 1014, "kind": "connection", "attributes": {"d": "12"}}]
 ```
 
 `kind` 选 `connection`（系统节点，默认）/ `detail`（系统细部）/ `component`（自定义组件）；
 留空为 `auto`，会按编号在 `Connection`、`Detail`、`Component` 之间逐个尝试。
 系统节点必须用 `Connection`/`Detail` 类，自定义组件才用 `Component`——这是 Tekla
-公开 API 的类层次，混用会静默 `Insert` 失败。
+公开 API 的类层次，混用会 `Insert` 失败。`Connection` 的位置由主/次构件决定，
+所以系统节点通常要同时给 `primary_guid` 和 `secondary_guids`（例如 1014 底板节点
+需要柱 + 底板两个零件），`point` 会被忽略。
 
 返回的每条 `created_items[].guid` 可直接喂给 `tekla_get_object_details`、
 `tekla_modify_parts`、`tekla_delete_objects`，或 `tekla_create_drawings` 出图。

@@ -1563,7 +1563,8 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
       number            组件编号，如 1014（内置节点用编号更稳）
       kind              connection（系统节点，默认）/ detail / component（自定义）
                         / auto（按编号自动判断并逐个尝试）
-      point / point2    组件定位点，可选（两点式组件两个都要给）
+      point / point2    定位点：Detail 用 point 作参考点；自定义组件用 point/point2；
+                        Connection（系统节点）由主/次构件决定位置，忽略 point
       attributes        组件属性键值对，如 {"d": "12"}（字符串）
       attributes_file   组件属性文件，如 "standard"
     默认只预览；confirm=True 才插入并 CommitChanges。
@@ -1640,8 +1641,10 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
                 try:
                     component = _build_component(classes[class_name], class_name, plan)
                     if not bool(component.Insert()):
-                        last_error = (f"{class_name}.Insert 返回 False：检查编号是否存在、"
-                                      "主次构件类型是否匹配、定位点是否足够")
+                        last_error = (
+                            f"{class_name}.Insert 返回 False：检查编号是否存在；"
+                            "系统节点（Connection）通常必须同时给主构件和次构件；"
+                            "自定义组件再检查定位点/属性是否足够")
                         continue
                     created.append({"index": plan["index"],
                                     "component_class": class_name,

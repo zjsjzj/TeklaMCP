@@ -77,8 +77,12 @@
 - ✅ 21 个单元测试通过（`python -m unittest discover -s tests`），
   用 `tests/fake_tekla.py` 模拟 pythonnet 的元组返回、GUID 与 Enumerator，
   无需 Windows/Tekla 即可回归参数校验、插入、提交、修改、删除回查。
-- ⚠️ 建模工具**尚未在真实 Tekla 模型上跑过**（本机不具备 Tekla 环境），
-  首次使用请先 `python demo_modeling.py` 预览，再加 `--confirm` 实跑。
+- ✅ 建模工具已在真实模型回归（2026-11-08，`插件开发.db1`，Tekla 2026.0）：
+  建柱/梁/多边形板/折梁、改等级与名称、1014 底板节点（柱+底板）、按 GUID 删除；
+  删除后 `part/assembly` 计数回到 4，测试数据已清理。
+- ✅ 过程中修正两处真实 API 差异：系统节点要用 `Connection`/`Detail`
+  （没有 `SetComponentInput`），且 `Connection` 通常必须给主+次构件；
+  `Component` 只用于自定义组件。
 - ✅ 远程调试通道：`tools/tekla_remote_bridge.py`（Windows，需 token）+
   `tools/remote_relay.py`（代理侧中继）。Windows 主动轮询，不用开入站端口；
   远程代理通过中继调用 MCP 工具，方便在没有交互式客户端的机器上做真实模型回归。
