@@ -196,12 +196,57 @@ class Component:
         return True
 
 
+class AutoDirectionTypeEnum:
+    AUTODIR_FROM_ATTRIBUTE_FILE = "AUTODIR_FROM_ATTRIBUTE_FILE"
+    AUTODIR_GLOBAL = "AUTODIR_GLOBAL"
+
+
 class Connection(Component):
-    pass
+    def __init__(self):
+        super().__init__()
+        self.primary = None
+        self.secondaries = []
+
+    def SetPrimaryObject(self, obj):
+        self.primary = obj
+        return True
+
+    def SetSecondaryObject(self, obj):
+        self.secondaries.append(obj)
+        return True
+
+    def SetSecondaryObjects(self, objects):
+        self.secondaries.extend(list(objects))
+        return True
+
+    def Insert(self):
+        if self.primary is None:
+            return False
+        COMPONENTS.append(self)
+        self.Identifier = Identifier()
+        return True
 
 
 class Detail(Component):
-    pass
+    def __init__(self):
+        super().__init__()
+        self.primary = None
+        self.reference_point = None
+
+    def SetPrimaryObject(self, obj):
+        self.primary = obj
+        return True
+
+    def SetReferencePoint(self, point):
+        self.reference_point = point
+        return True
+
+    def Insert(self):
+        if self.primary is None:
+            return False
+        COMPONENTS.append(self)
+        self.Identifier = Identifier()
+        return True
 
 
 class Enumerator:
@@ -324,6 +369,7 @@ def install():
                     Contour=Contour, ContourPoint=ContourPoint,
                     Chamfer=Chamfer, Position=Position,
                     Component=Component, Connection=Connection, Detail=Detail,
+                    AutoDirectionTypeEnum=AutoDirectionTypeEnum,
                     ComponentInput=ComponentInput,
                     ModelObjectSelector=ModelObjectSelector,
                     Identifier=Identifier)

@@ -1638,7 +1638,7 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
             last_error = ""
             for class_name in attempts:
                 try:
-                    component = _build_component(classes[class_name], plan)
+                    component = _build_component(classes[class_name], class_name, plan)
                     if not bool(component.Insert()):
                         last_error = (f"{class_name}.Insert 返回 False：检查编号是否存在、"
                                       "主次构件类型是否匹配、定位点是否足够")
@@ -1687,7 +1687,16 @@ def _component_classes():
     return {"component": Component, "connection": Connection, "detail": Detail}
 
 
-def _build_component(component_class, plan):
+def _build_component(component_class, class_name, plan):
+    """按组件类型走不同 API：
+
+    - Connection：SetPrimaryObject + SetSecondaryObject(s)，定位由构件决定
+    - Detail：SetPrimaryObject + SetReferencePoint(point)
+    - Component（自定义）：ComponentInput 的输入对象与输入点
+
+    这几个类虽然同属 BaseComponent，但连接/细部并没有 SetComponentInput，
+    混用会直接 AttributeError（已在真实 Tekla 上验证）。
+    """
     from Tekla.Structures.Model import ComponentInput
 
     component = component_class()
@@ -1699,6 +1708,26 @@ def _build_component(component_class, plan):
         component.LoadAttributesFromFile(plan["attributes_file"])
     for key, value in plan["attributes"].items():
         component.SetAttribute(key, value)
+
+    if class_name == "connection":
+        component.SetPrimaryObject(plan["primary"])
+        if len(plan["secondary"]) == 1:
+            component.SetSecondaryObject(plan["secondary"][0])
+        elif plan["secondary"]:
+            component.SetSecondaryObjects(_to_arraylist(plan["secondary"]))
+        try:  # 让方向跟随属性文件，避免节点方向随机
+            from Tekla.Structures.Model import AutoDirectionTypeEnum
+            component.AutoDirectionType = (
+                AutoDirectionTypeEnum.AUTODIR_FROM_ATTRIBUTE_FILE)
+        except Exception:
+            pass
+        return component
+    if class_name == "detail":
+        component.SetPrimaryObject(plan["primary"])
+        if plan["point"] is not None:
+            component.SetReferencePoint(plan["point"])
+        return component
+
     component_input = ComponentInput()
     component_input.AddInputObject(plan["primary"])
     for part in plan["secondary"]:
