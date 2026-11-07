@@ -1561,6 +1561,8 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
       secondary_guids   次构件 GUID，逗号分隔或数组（可选）
       name              组件名，如 "Base plate (1014)"
       number            组件编号，如 1014（内置节点用编号更稳）
+      kind              connection（系统节点，默认）/ detail / component（自定义）
+                        / auto（按编号自动判断并逐个尝试）
       point / point2    组件定位点，可选（两点式组件两个都要给）
       attributes        组件属性键值对，如 {"d": "12"}（字符串）
       attributes_file   组件属性文件，如 "standard"
@@ -1595,10 +1597,14 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
                     if point is None:
                         raise ValueError(f"{label} 给了 point2 就必须同时给 point")
                     point2 = _parse_point(spec["point2"], f"{label}.point2")
+                kind = str(spec.get("kind") or "auto").strip().lower()
+                if kind not in _COMPONENT_KINDS:
+                    raise ValueError(f"{label}.kind 只能是 {' / '.join(_COMPONENT_KINDS)}")
                 attributes = spec.get("attributes") or {}
                 if not isinstance(attributes, dict):
                     raise ValueError(f"{label}.attributes 需要 JSON 对象")
-                plans.append({"index": i, "spec": spec, "primary": primary[0],
+                plans.append({"index": i, "spec": spec, "kind": kind,
+                              "primary": primary[0],
                               "secondary": secondary, "name": name,
                               "number": number, "point": point, "point2": point2,
                               "attributes": {str(k): str(v) for k, v in attributes.items()},
@@ -1610,6 +1616,7 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
             "index": plan["index"],
             "primary_guid": _guid_of(plan["primary"]),
             "secondary_guids": [_guid_of(p) for p in plan["secondary"]],
+            "kind": plan["kind"],
             "name": plan["name"],
             "number": plan["number"],
             "attributes": plan["attributes"],
@@ -1624,40 +1631,31 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
             result["error"] = "没有可插入的组件，请先修正 errors 中的参数"
             return result
 
-        from Tekla.Structures.Model import Component, ComponentInput
-
+        classes = _component_classes()
         created = []
         for plan in plans:
-            try:
-                component = Component()
-                if plan["number"] is not None:
-                    component.Number = plan["number"]
-                if plan["name"]:
-                    component.Name = plan["name"]
-                if plan["attributes_file"]:
-                    component.LoadAttributesFromFile(plan["attributes_file"])
-                for key, value in plan["attributes"].items():
-                    component.SetAttribute(key, value)
-                component_input = ComponentInput()
-                component_input.AddInputObject(plan["primary"])
-                for part in plan["secondary"]:
-                    component_input.AddInputObject(part)
-                if plan["point"] is not None and plan["point2"] is not None:
-                    component_input.AddTwoInputPositions(plan["point"], plan["point2"])
-                elif plan["point"] is not None:
-                    component_input.AddOneInputPosition(plan["point"])
-                component.SetComponentInput(component_input)
-                if not bool(component.Insert()):
-                    raise RuntimeError("Insert 返回 False：检查组件编号是否存在、"
-                                       "主次构件类型是否匹配、定位点是否足够")
-                created.append({"index": plan["index"],
-                                "guid": _guid_of(component),
-                                "id": _object_id(component),
-                                "name": plan["name"],
-                                "number": plan["number"]})
-            except Exception as exc:
+            attempts = _component_class_order(plan["kind"], plan["number"])
+            last_error = ""
+            for class_name in attempts:
+                try:
+                    component = _build_component(classes[class_name], plan)
+                    if not bool(component.Insert()):
+                        last_error = (f"{class_name}.Insert 返回 False：检查编号是否存在、"
+                                      "主次构件类型是否匹配、定位点是否足够")
+                        continue
+                    created.append({"index": plan["index"],
+                                    "component_class": class_name,
+                                    "guid": _guid_of(component),
+                                    "id": _object_id(component),
+                                    "name": plan["name"],
+                                    "number": plan["number"]})
+                    last_error = ""
+                    break
+                except Exception as exc:
+                    last_error = f"{class_name}: {type(exc).__name__}: {exc}"
+            if last_error:
                 errors.append({"index": plan["index"],
-                               "error": f"{type(exc).__name__}: {exc}"})
+                               "error": f"尝试 {attempts} 均失败；最后一次: {last_error}"})
         committed = bool(_model().CommitChanges()) if created else False
         return {"dry_run": False, "count": len(items),
                 "created": len(created), "failed": len(items) - len(created),
@@ -1665,6 +1663,52 @@ def tekla_create_components(components: str, confirm: bool = False) -> dict:
                 "errors": errors}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+_COMPONENT_KINDS = ("auto", "component", "connection", "detail")
+
+
+def _component_class_order(kind, number):
+    """系统节点用 Connection/Detail，自定义组件用 Component。
+
+    Tekla 公开 API 里三者是不同类：Connection/Detail 对应系统节点，
+    Component 对应自定义组件（编号通常 >= 1000000）。不确定时按顺序试，
+    Insert 返回 False 不会写模型，多试一类没有副作用。
+    """
+    if kind and kind != "auto":
+        return [kind]
+    if number is None or number >= 1000000:
+        return ["component", "connection", "detail"]
+    return ["connection", "detail", "component"]
+
+
+def _component_classes():
+    from Tekla.Structures.Model import Component, Connection, Detail
+    return {"component": Component, "connection": Connection, "detail": Detail}
+
+
+def _build_component(component_class, plan):
+    from Tekla.Structures.Model import ComponentInput
+
+    component = component_class()
+    if plan["number"] is not None:
+        component.Number = plan["number"]
+    if plan["name"]:
+        component.Name = plan["name"]
+    if plan["attributes_file"]:
+        component.LoadAttributesFromFile(plan["attributes_file"])
+    for key, value in plan["attributes"].items():
+        component.SetAttribute(key, value)
+    component_input = ComponentInput()
+    component_input.AddInputObject(plan["primary"])
+    for part in plan["secondary"]:
+        component_input.AddInputObject(part)
+    if plan["point"] is not None and plan["point2"] is not None:
+        component_input.AddTwoInputPositions(plan["point"], plan["point2"])
+    elif plan["point"] is not None:
+        component_input.AddOneInputPosition(plan["point"])
+    component.SetComponentInput(component_input)
+    return component
 
 
 def _part_snapshot(part):

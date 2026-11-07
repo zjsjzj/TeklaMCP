@@ -169,6 +169,21 @@ class ModelingTestCase(unittest.TestCase):
         self.assertEqual(component.attributes, {"d": "12"})
         self.assertEqual(result["created_items"][0]["guid"],
                          component.Identifier.GUID)
+        self.assertEqual(result["created_items"][0]["component_class"],
+                         "connection")
+
+    def test_component_kind_selection(self):
+        primary, secondary = self._create_two_beams()
+        custom = ts.tekla_create_components(json.dumps([{
+            "primary_guid": primary, "secondary_guids": secondary,
+            "name": "MyNode", "number": 30000063,
+        }]), confirm=True)
+        self.assertEqual(custom["created_items"][0]["component_class"], "component")
+        detail = ts.tekla_create_components(json.dumps([{
+            "primary_guid": primary, "name": "MyDetail", "kind": "detail",
+            "point": "0,0,0",
+        }]), confirm=True)
+        self.assertEqual(detail["created_items"][0]["component_class"], "detail")
 
     def test_component_requires_name_or_number_and_valid_guids(self):
         primary, _ = self._create_two_beams()

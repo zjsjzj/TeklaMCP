@@ -196,6 +196,14 @@ class Component:
         return True
 
 
+class Connection(Component):
+    pass
+
+
+class Detail(Component):
+    pass
+
+
 class Enumerator:
     def __init__(self, items):
         self._items = list(items)
@@ -315,7 +323,8 @@ def install():
                     PolyBeam=PolyBeam, ContourPlate=ContourPlate,
                     Contour=Contour, ContourPoint=ContourPoint,
                     Chamfer=Chamfer, Position=Position,
-                    Component=Component, ComponentInput=ComponentInput,
+                    Component=Component, Connection=Connection, Detail=Detail,
+                    ComponentInput=ComponentInput,
                     ModelObjectSelector=ModelObjectSelector,
                     Identifier=Identifier)
     geo = _module("Tekla.Structures.Geometry3d", Point=Point)
