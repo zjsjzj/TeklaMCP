@@ -1,11 +1,15 @@
 <#
-    一键安装「远程 Tekla 桥」到当前 Windows 用户：
-      - 下载最新源码到 %LOCALAPPDATA%\TeklaMCP-agent
-      - 生成 start-bridge.ps1（带 token/relay、日志写 bridge.log）
-      - 注册登录自启任务 TeklaMCPBridge 并立即启动
+    One-click installer for the remote Tekla bridge.
 
-    用法（在任意 PowerShell 里）：
-      powershell -ExecutionPolicy Bypass -File install_bridge.ps1
+    Downloads the latest source into %LOCALAPPDATA%\TeklaMCP-agent,
+    writes start-bridge.ps1 (token/relay, log to bridge.log),
+    registers a logon task "TeklaMCPBridge" and starts it.
+
+    Usage:
+      powershell -ExecutionPolicy Bypass -File install_bridge.ps1 -Token <token>
+
+    Keep this file ASCII-only: Windows PowerShell 5.1 misparses UTF-8
+    without BOM (Chinese text becomes GBK garbage and breaks quoting).
 #>
 param(
     [string]$Relay = "http://10.10.10.20:8765",
@@ -18,57 +22,55 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not $Token) {
-    throw "必须提供 -Token（由代理提供），不要把 token 提交到仓库"
+    throw "Token is required: -Token <token>"
 }
 if (-not (Test-Path $Python)) {
-    throw "找不到 Python：$Python；用 -Python <路径> 指定装好 pythonnet/mcp 的解释器"
+    throw "Python not found: $Python (pass -Python <path>)"
 }
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 
 $zip = Join-Path $InstallDir "source.zip"
 $url = "https://github.com/zjsjzj/TeklaMCP/archive/refs/heads/$Branch.zip"
-Write-Host "下载 $url"
+Write-Host "Downloading $url"
 Invoke-WebRequest $url -OutFile $zip
 Expand-Archive $zip $InstallDir -Force
 
 $src = Get-ChildItem $InstallDir -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not (Test-Path (Join-Path $src.FullName "tekla_server.py"))) {
-    throw "解压目录里没有 tekla_server.py：$($src.FullName)"
+$server = Join-Path $src.FullName "tekla_server.py"
+if (-not (Test-Path $server)) {
+    throw "tekla_server.py not found under $($src.FullName)"
 }
-if (-not (Select-String -Path (Join-Path $src.FullName "tekla_server.py") -Pattern "_component_class_order" -Quiet)) {
-    throw "源码不是最新版（缺少 _component_class_order），请检查网络/分支"
+if (-not (Select-String -Path $server -Pattern "_component_class_order" -Quiet)) {
+    throw "Downloaded source is stale (missing _component_class_order); check network/branch"
 }
 
-# 只保留一个桥：先结束旧进程
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -like "*tekla_remote_bridge.py*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 $startScript = Join-Path $InstallDir "start-bridge.ps1"
-$content = @"
-`$ErrorActionPreference = "Continue"
-& "$Python" "$($src.FullName)\tools\tekla_remote_bridge.py" --token $Token --relay $Relay *>> "$InstallDir\bridge.log"
-"@
+$content = @(
+    '$ErrorActionPreference = "Continue"',
+    ('& "{0}" "{1}" --token {2} --relay {3} *>> "{4}"' -f $Python, (Join-Path $src.FullName "tools\tekla_remote_bridge.py"), $Token, $Relay, (Join-Path $InstallDir "bridge.log"))
+)
 Set-Content -Path $startScript -Value $content -Encoding UTF8
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument ('-WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $startScript)
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ('-WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $startScript)
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+
 try {
-    Register-ScheduledTask -TaskName "TeklaMCPBridge" -Action $action -Trigger $trigger `
-        -Settings $settings -Force | Out-Null
+    Register-ScheduledTask -TaskName "TeklaMCPBridge" -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskName "TeklaMCPBridge"
-    Write-Host "已注册登录自启任务 TeklaMCPBridge，并已启动。"
+    Write-Host "Registered logon task TeklaMCPBridge and started it."
 } catch {
-    Write-Warning "注册计划任务失败（可能需要管理员）：$($_.Exception.Message)"
-    Write-Host "改为直接启动一个可见窗口；以后可手动运行：$startScript"
-    Start-Process powershell -ArgumentList @(
-        "-ExecutionPolicy", "Bypass", "-File", $startScript)
+    Write-Warning "Register-ScheduledTask failed (admin rights?): $($_.Exception.Message)"
+    Write-Host "Starting a visible window instead; later run: $startScript"
+    Start-Process powershell -ArgumentList @("-ExecutionPolicy", "Bypass", "-File", $startScript)
 }
 
 Write-Host ""
-Write-Host "安装完成：$($src.FullName)"
-Write-Host "日志：$InstallDir\bridge.log"
-Write-Host "停止：Stop-ScheduledTask -TaskName TeklaMCPBridge"
-Write-Host "卸载：Unregister-ScheduledTask -TaskName TeklaMCPBridge -Confirm:`$false"
+Write-Host "Installed: $($src.FullName)"
+Write-Host "Log: $InstallDir\bridge.log"
+Write-Host "Stop: Stop-ScheduledTask -TaskName TeklaMCPBridge"
+Write-Host "Remove: Unregister-ScheduledTask -TaskName TeklaMCPBridge -Confirm:$false"
