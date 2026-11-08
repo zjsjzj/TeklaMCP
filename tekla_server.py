@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.3"
+__version__ = "2.3.4"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2537,6 +2537,91 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
         return {"output_dir": out_dir, "count": len(results),
                 "succeeded": succeeded, "failed": len(results) - succeeded,
                 "results": results}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# 编号（Numbering）——批量出图/正式 BOM 的前置动作
+# ---------------------------------------------------------------------------
+def _numbering_summary() -> dict:
+    """统计当前范围内未编号的零件/构件位置（只读）。"""
+    objs = [o for o in _targets("all") if isinstance(o, Part)]
+    part_pos = [_report_str(o, "PART_POS") or "" for o in objs]
+    asm_pos = [_report_str(o, "ASSEMBLY_POS") or "" for o in objs]
+    unnumbered = [i for i, (p, a) in enumerate(zip(part_pos, asm_pos))
+                  if not p or "?" in p or not a or "?" in a]
+    numbered_parts = [p for p in part_pos if p and "?" not in p]
+    return {
+        "part_count": len(objs),
+        "unnumbered_count": len(unnumbered),
+        "numbered_count": len(objs) - len(unnumbered),
+        "bom_ready": bool(objs) and not unnumbered,
+        "unique_part_position_count": len(set(numbered_parts)),
+        "shared_position_count": len(numbered_parts) - len(set(numbered_parts)),
+    }
+
+
+@server.tool()
+@_synchronized
+def tekla_run_numbering(confirm: bool = False, timeout_seconds: int = 180) -> dict:
+    """对当前模型执行 Tekla 编号（Numbering）。
+
+    编号后零件/构件才有真实的 PART_POS/ASSEMBLY_POS，才能批量生成单件图与正式 BOM。
+    confirm=False 时只返回编号状态，不执行。timeout_seconds 用于等待后台编号任务。
+    """
+    try:
+        _require_api()
+        before = _numbering_summary()
+        if not confirm:
+            return {"dry_run": True, "before": before,
+                    "hint": "confirm=True 才会真正执行编号"}
+        if before["bom_ready"]:
+            return {"dry_run": False, "already_numbered": True, "before": before,
+                    "after": before}
+        attempt_errors = []
+        launched = False
+        # 首选：Operation.RunNumbering()（2021 及以后版本提供）
+        try:
+            from Tekla.Structures.Model.Operations import Operation
+            runner = _safe(Operation, "RunNumbering")
+            if callable(runner):
+                launched = bool(runner())
+            if not launched:
+                attempt_errors.append("Operation.RunNumbering() 返回 False")
+        except Exception as exc:
+            attempt_errors.append(f"{type(exc).__name__}: {exc}")
+        # 备选：执行 Tekla 宏 RunNumbering
+        if not launched:
+            try:
+                from Tekla.Structures.Model.Operations import Operation
+                macro = _safe(Operation, "RunMacro")
+                if callable(macro):
+                    launched = bool(macro("RunNumbering"))
+                if not launched:
+                    attempt_errors.append("Operation.RunMacro('RunNumbering') 返回 False")
+            except Exception as exc:
+                attempt_errors.append(f"{type(exc).__name__}: {exc}")
+        # 轮询等待后台编号结束（最多 timeout_seconds 秒）
+        waited = 0
+        after = before
+        deadline = max(5, min(int(timeout_seconds), 600))
+        while launched and waited < deadline:
+            try:
+                _model().CommitChanges()
+            except Exception:
+                pass
+            after = _numbering_summary()
+            if after["bom_ready"]:
+                break
+            time.sleep(2)
+            waited += 2
+        return {"dry_run": False, "launched": launched, "waited_seconds": waited,
+                "before": before, "after": after,
+                "attempt_errors": attempt_errors,
+                "recommendation": ("" if after["bom_ready"] else
+                                   "编号未完成：请在 Tekla 界面 Ctrl+A → 右键“编号”，"
+                                   "或检查“编号设置”是否被设为手动/后台未执行。")}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 

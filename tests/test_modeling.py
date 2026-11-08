@@ -329,6 +329,49 @@ class ModelingTestCase(unittest.TestCase):
             self.assertIn(name, ts.server.tools)
 
 
+
+class RunNumberingTests(unittest.TestCase):
+    """编号工具：dry_run 不改模型；confirm 后编号状态闭环。"""
+
+    def _fresh(self, parts=3):
+        import tekla_server as ts
+        fake_tekla.MODEL.objects.clear()
+        fake_tekla.MODEL.numbered = False
+        fake_tekla.MODEL.numbering_calls = 0
+        rows = [dict(_beam(), name=f"TB-{i:02d}") for i in range(1, parts + 1)]
+        created = ts.tekla_create_parts(json.dumps(rows), confirm=True)
+        return ts, created
+
+    def test_dry_run_reports_unnumbered_without_running(self):
+        ts, _ = self._fresh()
+        res = ts.tekla_run_numbering(confirm=False)
+        self.assertTrue(res["dry_run"])
+        self.assertEqual(res["before"]["part_count"], 3)
+        self.assertEqual(res["before"]["unnumbered_count"], 3)
+        self.assertFalse(res["before"]["bom_ready"])
+        self.assertEqual(fake_tekla.MODEL.numbering_calls, 0)
+
+    def test_confirm_runs_numbering_and_closes_loop(self):
+        ts, _ = self._fresh()
+        res = ts.tekla_run_numbering(confirm=True, timeout_seconds=5)
+        self.assertFalse(res["dry_run"])
+        self.assertTrue(res["launched"])
+        self.assertTrue(res["after"]["bom_ready"])
+        self.assertEqual(res["after"]["unnumbered_count"], 0)
+        self.assertEqual(fake_tekla.MODEL.numbering_calls, 1)
+
+    def test_already_numbered_skips_operation(self):
+        ts, _ = self._fresh()
+        ts.tekla_run_numbering(confirm=True, timeout_seconds=5)
+        res = ts.tekla_run_numbering(confirm=True, timeout_seconds=5)
+        self.assertTrue(res.get("already_numbered"))
+        self.assertEqual(fake_tekla.MODEL.numbering_calls, 1)
+
+    def test_tool_registered(self):
+        import tekla_server as ts
+        self.assertIn("tekla_run_numbering", ts.server.tools)
+
+
 if __name__ == "__main__":
     unittest.main()
 

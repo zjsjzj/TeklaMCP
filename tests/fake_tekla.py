@@ -95,6 +95,10 @@ class Part(ModelObject):
                    "MATERIAL": self.Material.MaterialString}
         if name in mapping:
             return (True, mapping[name])
+        if name in ("PART_POS", "ASSEMBLY_POS"):
+            if getattr(MODEL, "numbered", False):
+                return (True, "P1" if name == "PART_POS" else "A1")
+            return (True, "P0(?)" if name == "PART_POS" else "A0(?)")
         return (False, placeholder)
 
     def GetPhase(self):
@@ -334,6 +338,8 @@ class Model:
         if not hasattr(self, "objects"):
             self.objects = {}
             self.commit_count = 0
+            self.numbered = False
+            self.numbering_calls = 0
 
     def add(self, model_object):
         self.objects[model_object.Identifier.GUID] = model_object
@@ -414,6 +420,16 @@ def install():
                     ComponentInput=ComponentInput,
                     ModelObjectSelector=ModelObjectSelector,
                     Identifier=Identifier)
+    class Operation:
+        @staticmethod
+        def RunNumbering():
+            MODEL.numbering_calls += 1
+            MODEL.numbered = True
+            return True
+
+    operations = _module("Tekla.Structures.Model.Operations", Operation=Operation)
+    model.Operations = operations
+
     geo = _module("Tekla.Structures.Geometry3d", Point=Point, Vector=Vector)
     ui = _module("Tekla.Structures.Model.UI",
                  ModelObjectSelector=ModelObjectSelector)
