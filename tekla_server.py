@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1010,6 +1010,73 @@ def tekla_check_connection() -> dict:
         return {"connected": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _try_set(obj, name, value):
+    """尝试给属性赋值，返回 ok / 只读 / 类型错误 的简短结论。"""
+    if not hasattr(obj, name):
+        return "缺失"
+    try:
+        setattr(obj, name, value)
+        return "可写"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {str(exc).splitlines()[0][:60]}"
+
+
+_SPIRAL_DUMP_FIELDS = ("StartPoint", "EndPoint", "RotationAxisBasePoint",
+                       "RotationAxisDirection", "RotationAxisUpPoint",
+                       "RotationAngle", "TotalRise", "TwistAngleStart",
+                       "TwistAngleEnd", "Profile", "Name", "Class")
+
+
+@server.tool()
+@_synchronized
+def tekla_spiral_dump(guids: str = "", limit: int = 5) -> dict:
+    """把模型里已有的 SpiralBeam 的螺旋参数全部读出来（对新版属性不理解时用它照抄）。
+
+    guids 为空时自动在全模型里找前 limit 根螺旋梁。只读，不修改模型。
+    """
+    try:
+        _require_api()
+        objs = []
+        if str(guids or "").strip():
+            objs, invalid, missing = _objects_from_guids(guids)
+            if invalid or missing:
+                return {"error": "GUID 无效或不存在", "invalid": invalid, "missing": missing}
+        else:
+            all_objs = _model().GetObjects()
+            for o in all_objs:
+                try:
+                    if isinstance(o, SpiralBeamClass()):
+                        objs.append(o)
+                except Exception:
+                    continue
+                if len(objs) >= max(1, int(limit)):
+                    break
+        rows = []
+        for o in objs[:max(1, int(limit))]:
+            row = {"guid": _guid_of(o), "type": type(o).__name__}
+            for field in _SPIRAL_DUMP_FIELDS:
+                try:
+                    value = getattr(o, field)
+                    if hasattr(value, "X") and hasattr(value, "Y"):
+                        row[field] = [round(value.X, 3), round(value.Y, 3), round(value.Z, 3)]
+                    elif hasattr(value, "ProfileString"):
+                        row[field] = value.ProfileString
+                    elif isinstance(value, float):
+                        row[field] = round(value, 4)
+                    else:
+                        row[field] = str(value)
+                except Exception as exc:
+                    row[field] = f"<{type(exc).__name__}>"
+            rows.append(row)
+        return {"count": len(rows), "spiral_beams": rows}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def SpiralBeamClass():
+    return _spiral_beam_class()
+
+
 @server.tool()
 @_synchronized
 def tekla_spiral_api_info(probe: bool = False) -> dict:
@@ -1035,6 +1102,7 @@ def tekla_spiral_api_info(probe: bool = False) -> dict:
                                          ("spiral", "radius", "turn", "pitch", "axis", "rise", "height", "angle"))],
             "member_count": len(members),
         }
+        result["all_members"] = members
         if probe:
             from Tekla.Structures.Geometry3d import Point as _P, Vector as _V
             probe_values = {"axis_base": _P(0, 0, 0), "axis_up": _P(600, 0, 0),
@@ -1051,9 +1119,12 @@ def tekla_spiral_api_info(probe: bool = False) -> dict:
                         except Exception as exc:
                             writes[key] = f"{name} (失败: {type(exc).__name__})"
                         break
+            writes["__StartPoint__"] = _try_set(inst, "StartPoint", _P(0, 0, 0))
+            writes["__EndPoint__"] = _try_set(inst, "EndPoint", _P(1, 0, 0))
+            writes["__Position__"] = _try_set(inst, "Position", inst.Position)
             result["probe_writes"] = writes
-            result["start_end"] = {"StartPoint": hasattr(inst, "StartPoint"),
-                                   "EndPoint": hasattr(inst, "EndPoint")}
+            result["start_end"] = {"StartPoint": _try_set(inst, "StartPoint", _P(0, 0, 0)),
+                                   "EndPoint": _try_set(inst, "EndPoint", _P(1, 0, 0))}
         return result
     except Exception as exc:
         return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
