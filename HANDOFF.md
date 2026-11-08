@@ -3,7 +3,7 @@
 > 写给在新电脑上继续开发的人（也可能是未来的自己）。
 > 本文档自包含：读完这一份就能接着干，不需要原电脑上的任何上下文。
 >
-> 版本：服务端 v2.2.0（2026-11-08，新增螺旋梁 SpiralBeam + API 探测工具）
+> 版本：服务端 v2.2.1（2026-11-08，新增螺旋梁 SpiralBeam + API 探测工具；2026-11-08 真机校准）
 > 验证环境：Windows 11 / Tekla Structures 2026.0 / Python 3.13 / pythonnet 3.2.1 / mcp 2.3.0
 
 ---
@@ -64,6 +64,15 @@
 - ✅ BOM 导出 CSV（utf-8-sig）与 Excel（openpyxl，冻结首行+筛选）实测。
 - ✅ UDA 写入链路实测（set→读回→还原，未调 CommitChanges 时磁盘不变）。
 - ✅ `install.ps1` 合并写配置实测（预置其它 MCP 服务不被冲掉）。
+
+### v2.2.1 真机校准（2026-11-08）
+
+- Tekla 2026.0 实测：`SpiralBeam.StartPoint/EndPoint` **只读**（赋值抛 `TypeError: property is read-only`），
+  几何只能由 `RotationAxisBasePoint` / `RotationAxisDirection` / `RotationAxisUpPoint` /
+  `RotationAngle`(度) / `TotalRise`(mm) / `TwistAngleStart` / `TwistAngleEnd` 定义。
+- 对应地在 `tekla_create_parts` 的 spiral 分支里：**不再写 StartPoint/EndPoint**；`radius`+`start_angle`
+  自动推出 `axis_up`；`axis_base` 缺省取 `start`；`axis_dir` 缺省 `0,0,1`。
+- 单测用仿真类模拟只读属性（`tests/fake_tekla.py`），29 个用例全部通过。
 
 ### v2.2.0 新增（2026-11-08）
 

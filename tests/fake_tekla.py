@@ -136,18 +136,44 @@ class PolyBeam(Part):
         self.Contour.AddContourPoint(contour_point)
 
 
+class Vector:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.X, self.Y, self.Z = float(x), float(y), float(z)
+
+    def __repr__(self):
+        return f"Vector({self.X},{self.Y},{self.Z})"
+
+
 class SpiralBeam(Part):
-    """螺旋梁（Tekla 2016+ Open API 类型），只保留建模用到的螺旋参数。"""
+    """螺旋梁（Tekla 2026 实测）：StartPoint/EndPoint 只读，几何由旋转轴+转角+升高定义。"""
 
     def __init__(self):
         super().__init__()
-        self.StartPoint = Point()
-        self.EndPoint = Point()
-        self.Radius = 0.0
-        self.Turns = 0.0
-        self.Pitch = 0.0
-        self.StartAngle = 0.0
-        self.RotationAxis = None
+        self._start = Point()
+        self._end = Point()
+        self.RotationAxisBasePoint = None
+        self.RotationAxisDirection = None
+        self.RotationAxisUpPoint = None
+        self.RotationAngle = 0.0
+        self.TotalRise = 0.0
+        self.TwistAngleStart = 0.0
+        self.TwistAngleEnd = 0.0
+
+    @property
+    def StartPoint(self):
+        return self._start
+
+    @StartPoint.setter
+    def StartPoint(self, value):
+        raise TypeError("property is read-only")
+
+    @property
+    def EndPoint(self):
+        return self._end
+
+    @EndPoint.setter
+    def EndPoint(self, value):
+        raise TypeError("property is read-only")
 
 
 class ContourPlate(Part):
@@ -388,7 +414,7 @@ def install():
                     ComponentInput=ComponentInput,
                     ModelObjectSelector=ModelObjectSelector,
                     Identifier=Identifier)
-    geo = _module("Tekla.Structures.Geometry3d", Point=Point)
+    geo = _module("Tekla.Structures.Geometry3d", Point=Point, Vector=Vector)
     ui = _module("Tekla.Structures.Model.UI",
                  ModelObjectSelector=ModelObjectSelector)
     structures.Model = model

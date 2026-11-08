@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -738,15 +738,33 @@ def _enum_member(enum_type, text, label, mapping):
     return getattr(enum_type, mapping[key])
 
 
-# 螺旋梁属性候选名（不同 Tekla 版本命名略有差异，逐个尝试）
+# 螺旋梁属性候选名（Tekla 2026 实测为 RotationAxisBasePoint / RotationAxisDirection /
+# RotationAxisUpPoint / RotationAngle / TotalRise / TwistAngleStart / TwistAngleEnd；
+# 其它版本命名可能不同，按候选表逐个尝试）
 _SPIRAL_PROP_CANDIDATES = {
-    "radius": ("Radius", "Radius2", "R"),
-    "turns": ("Turns", "NumberOfTurns", "TurnCount", "Rotations"),
-    "pitch": ("Pitch", "Height", "Rise", "TotalRise", "HeightPerTurn"),
-    "axis": ("RotationAxis", "AxisLine", "Axis", "CenterAxis", "RotationAxisLine"),
-    "direction": ("RotationDirection", "Direction", "Clockwise", "IsClockwise"),
-    "start_angle": ("StartAngle", "Angle", "StartRotation"),
+    "axis_base": ("RotationAxisBasePoint", "AxisBasePoint", "CenterPoint"),
+    "axis_dir": ("RotationAxisDirection", "AxisDirection", "DirectionVector"),
+    "axis_up": ("RotationAxisUpPoint", "AxisUpPoint", "UpPoint"),
+    "rotation_angle": ("RotationAngle", "Angle", "TotalAngle", "SweepAngle"),
+    "total_rise": ("TotalRise", "Rise", "Height"),
+    "twist_start": ("TwistAngleStart", "StartTwist"),
+    "twist_end": ("TwistAngleEnd", "EndTwist"),
 }
+
+
+def _parse_vector(value, label):
+    """接受 "0,0,1" / "(0,0,1)" / [0,0,1] / {"x":..} → Vector。"""
+    from Tekla.Structures.Geometry3d import Vector
+    if isinstance(value, dict):
+        x, y, z = value.get("x", 0), value.get("y", 0), value.get("z", 0)
+    elif isinstance(value, (list, tuple)):
+        x, y, z = (list(value) + [0, 0, 0])[:3]
+    else:
+        parts = str(value).strip().strip("()[]").replace(" ", "").split(",")
+        if len(parts) != 3:
+            raise ValueError(f"{label} 需要 x,y,z 三个数，收到 {value!r}")
+        x, y, z = parts
+    return Vector(float(x), float(y), float(z))
 
 
 def _spiral_beam_class():
@@ -765,28 +783,59 @@ def _spiral_beam_class():
 
 
 def _apply_spiral_parameters(part, spec, label):
-    """把 radius / turns / pitch / axis / direction 写入 SpiralBeam，返回实际生效项。"""
+    """把螺旋参数写入 SpiralBeam，返回实际生效项与未匹配项。
+
+    约定（Tekla 2026 实测）：半径 = |axis_up − axis_base|，起始方向 = axis_up 相对
+    axis_base 的方向；axis_dir 为旋转轴方向（右手法则决定旋向）。
+    """
     applied, missing = {}, []
+    # 默认值：axis_base ← start；axis_up ← axis_base + radius(∠start_angle)；axis_dir ← +Z
+    if spec.get("axis_base") in (None, ""):
+        base = _parse_point(spec.get("start"), f"{label}.start")
+        applied["axis_base_from_start"] = True
+    else:
+        base = _parse_point(spec.get("axis_base"), f"{label}.axis_base")
+    radius = spec.get("radius")
+    if spec.get("axis_up") in (None, "") and radius not in (None, ""):
+        import math as _math
+        ang = float(spec.get("start_angle") or 0.0) * _math.pi / 180.0
+        r = _as_float(radius, f"{label}.radius")
+        spec = dict(spec)
+        spec["axis_up"] = [base.X + r * _math.cos(ang),
+                           base.Y + r * _math.sin(ang), base.Z]
+        applied["axis_up_from_radius"] = True
+    if spec.get("axis_dir") in (None, ""):
+        spec = dict(spec)
+        spec["axis_dir"] = [0.0, 0.0, 1.0]
+    if base is not None and spec.get("axis_base") in (None, ""):
+        spec = dict(spec)
+        spec["axis_base"] = [base.X, base.Y, base.Z]
+    point_keys = ("axis_base", "axis_up")
+    vector_keys = ("axis_dir",)
+    number_keys = ("rotation_angle", "total_rise", "twist_start", "twist_end")
     for key, names in _SPIRAL_PROP_CANDIDATES.items():
         if spec.get(key) in (None, ""):
             continue
-        value = spec[key]
+        raw_value = spec[key]
         done = False
         for name in names:
             if hasattr(part, name):
                 try:
-                    if key == "axis":
-                        value = _parse_point(value, f"{label}.axis")
-                    elif key == "direction":
-                        value = bool(value) if isinstance(value, bool) else (
-                            str(value).lower() in ("1", "true", "cw", "clockwise", "顺", "顺时针"))
-                    elif key in ("radius", "turns", "pitch", "start_angle"):
-                        value = _as_float(value, f"{label}.{key}")
+                    if key in point_keys:
+                        value = _parse_point(raw_value, f"{label}.{key}")
+                    elif key in vector_keys:
+                        value = _parse_vector(raw_value, f"{label}.{key}")
+                    elif key in number_keys:
+                        value = _as_float(raw_value, f"{label}.{key}")
+                    else:
+                        value = raw_value
                     setattr(part, name, value)
                     applied[key] = name
                     done = True
                     break
-                except Exception:
+                except Exception as exc:
+                    applied.setdefault("errors", []).append(
+                        f"{name}: {type(exc).__name__}: {exc}")
                     continue
         if not done:
             missing.append(key)
@@ -899,6 +948,11 @@ def _build_part(spec, label):
         minimum = 2 if kind == "polybeam" else 3
         points = _parse_points(spec.get("points"), f"{label}.points", minimum)
         _add_contour_points(part, points)
+    elif kind == "spiral":
+        # 实测 Tekla 2026 的 SpiralBeam：StartPoint/EndPoint 只读，
+        # 几何由 旋转轴基点/方向/上方向点 + 转角 + 总升高 决定
+        if spec.get("axis_base") in (None, "") and spec.get("start") in (None, ""):
+            raise ValueError(f"{label}（螺旋梁）需要 axis_base（旋转轴基点）或 start 坐标")
     else:
         if spec.get("start") in (None, "") or spec.get("end") in (None, ""):
             raise ValueError(f"{label} 需要 start 与 end 坐标")
@@ -922,7 +976,8 @@ def _part_preview(spec, kind, attributes):
         preview["start"] = spec.get("start")
         preview["end"] = spec.get("end")
     preview.update({k: v for k, v in attributes.items() if v})
-    for key in ("radius", "turns", "pitch", "axis", "direction", "start_angle"):
+    for key in ("axis_base", "axis_dir", "axis_up", "rotation_angle",
+                "total_rise", "twist_start", "twist_end", "radius", "start_angle"):
         if spec.get(key) not in (None, ""):
             preview[key] = spec[key]
     for key in ("plane", "plane_offset", "rotation", "rotation_offset",
@@ -981,22 +1036,24 @@ def tekla_spiral_api_info(probe: bool = False) -> dict:
             "member_count": len(members),
         }
         if probe:
+            from Tekla.Structures.Geometry3d import Point as _P, Vector as _V
+            probe_values = {"axis_base": _P(0, 0, 0), "axis_up": _P(600, 0, 0),
+                            "axis_dir": _V(0, 0, 1), "rotation_angle": 270.0,
+                            "total_rise": 2952.4, "twist_start": 0.0,
+                            "twist_end": 0.0}
             writes = {}
             for key, names in _SPIRAL_PROP_CANDIDATES.items():
                 for name in names:
                     if hasattr(inst, name):
                         try:
-                            probe_value = 600.0 if key == "radius" else (
-                                0.75 if key == "turns" else (3936.5 if key == "pitch" else
-                                (0.0 if key == "start_angle" else
-                                 (None if key == "axis" else True))))
-                            if probe_value is not None:
-                                setattr(inst, name, probe_value)
+                            setattr(inst, name, probe_values[key])
                             writes[key] = name
-                            break
                         except Exception as exc:
                             writes[key] = f"{name} (失败: {type(exc).__name__})"
+                        break
             result["probe_writes"] = writes
+            result["start_end"] = {"StartPoint": hasattr(inst, "StartPoint"),
+                                   "EndPoint": hasattr(inst, "EndPoint")}
         return result
     except Exception as exc:
         return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1573,8 +1630,11 @@ def tekla_create_parts(parts: str, confirm: bool = False) -> dict:
       type       beam(默认) / column / polybeam / contour_plate / panel /
                  pad_footing / strip_footing / spiral（螺旋梁）
                  （也接受 梁/柱/板/折梁/螺旋梁 等中文）
-      ★ spiral（螺旋梁）额外参数：radius 半径、turns 圈数 或 pitch 螺距(mm/圈)、
-                 axis 旋转轴心点 [x,y,z]（默认原点）、direction 是否顺时针、start_angle 起始角
+      ★ spiral（螺旋梁）参数（Tekla 2026 实测 API）：
+                 axis_base 旋转轴基点 [x,y,z]（缺省取 start）、axis_dir 轴方向（默认 0,0,1）、
+                 axis_up 半径参考点（缺省由 radius+start_angle 推出，半径=|axis_up−axis_base|）、
+                 rotation_angle 总转角(度)、total_rise 总升高(mm)、twist_start/twist_end 截面扭转角。
+                 注意：SpiralBeam 的 StartPoint/EndPoint 是只读的，不要传。
       profile    规格，如 "HEA200"、"PL10"、"RHS300*200*6"（必填）
       start/end  beam 类构件的起止点："6000,0,0" 或 [6000,0,0]
       points     polybeam / contour_plate 的坐标数组

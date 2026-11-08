@@ -99,11 +99,16 @@ python -m venv .venv
 
 ```json
 {"type": "spiral", "profile": "RHS300*100*10", "class": "8", "name": "内环梁",
- "start": "600,0,-2.4", "end": "0,-600,2950",
- "radius": 600, "turns": 0.75, "pitch": 3936.5, "axis": "0,0,0"}
+ "axis_base": "0,0,-2.4", "axis_dir": "0,0,1",
+ "radius": 600, "start_angle": 0,
+ "rotation_angle": 270, "total_rise": 2952.4}
 ```
 
-- `radius` 半径、`turns` 圈数（与 `pitch` 螺距二选一即可）、`axis` 旋转轴心点（默认原点）、`direction` 是否顺时针；
+- **Tekla 2026 实测 API**：`RotationAxisBasePoint` + `RotationAxisDirection` + `RotationAxisUpPoint`
+  + `RotationAngle` + `TotalRise`（±`TwistAngleStart/End`）；**`StartPoint`/`EndPoint` 是只读的，不要传**；
+- 半径 = |`axis_up` − `axis_base`|，起始方向 = `axis_up` 相对 `axis_base` 的方向；不传 `axis_up` 时
+  用 `radius` + `start_angle` 自动推出；`axis_dir` 默认 `0,0,1`（右手法则决定旋向）；
+- 注意 `RotationAngle` 用**度**、`TotalRise` 用 **mm**；
 - 属性名在不同 Tekla 版本略有差异，服务端按候选名逐个匹配（`Radius/Turns/Pitch/RotationAxis…`），实际生效项会在返回的 `spiral` 字段里列出，未匹配的进 `spiral_missing`；
 - 不确定本机属性名时，先调用只读工具 **`tekla_spiral_api_info`**（`probe=true` 会更进一步尝试赋值），它不写模型，返回该类可用的螺旋属性清单。
 
