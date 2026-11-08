@@ -370,6 +370,7 @@ class RunNumberingTests(unittest.TestCase):
     def test_tool_registered(self):
         import tekla_server as ts
         self.assertIn("tekla_run_numbering", ts.server.tools)
+        self.assertIn("tekla_api_find_member", ts.server.tools)
 
     def test_missing_run_numbering_reports_reason(self):
         """本机 API 没有 RunNumbering 时，attempts 要明确写"方法不存在"而不是含糊的 False。"""

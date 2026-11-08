@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.5"
+__version__ = "2.3.6"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2828,6 +2828,80 @@ def tekla_api_probe(class_name: str = "Tekla.Structures.Model.BooleanPart",
                   for name in _split_names(members)}
         return {"class": str(cls), "member_count": len(available),
                 "members": available, "wanted": wanted}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@server.tool()
+@_synchronized
+def tekla_api_find_member(pattern: str = "Numbering",
+                          assemblies: str = "Tekla") -> dict:
+    """在已加载的 Tekla 程序集里按成员名模糊查找（只读，不需要打开模型）。
+
+    用于确认某个版本的 API 到底把功能放在哪个类里，例如：
+      pattern="Numbering" → 找出所有与编号相关的方法/属性；
+      pattern="RunNumbering" → 确认老接口是否还在。
+    assemblies 逗号分隔，匹配程序集名前缀；"Tekla" 表示所有 Tekla 程序集。
+    """
+    try:
+        _require_api()
+        from System import AppDomain
+        from System.Reflection import BindingFlags
+        if hasattr(BindingFlags, "Public"):
+            flags = (BindingFlags.Public | BindingFlags.NonPublic |
+                     BindingFlags.Static | BindingFlags.Instance |
+                     BindingFlags.DeclaredOnly)
+        else:  # pythonnet 枚举比较特殊时退回数字
+            flags = BindingFlags(60)
+        wanted = [a.strip().lower() for a in (assemblies or "Tekla").split(",") if a.strip()]
+        needle = (pattern or "").lower()
+        scanned, hits, skipped = {}, [], []
+        for asm in AppDomain.CurrentDomain.GetAssemblies():
+            try:
+                name = str(asm.GetName().Name)
+            except Exception:
+                continue
+            low = name.lower()
+            if not any(low.startswith(w) for w in wanted):
+                continue
+            try:
+                types = asm.GetTypes()
+            except Exception as exc:
+                skipped.append({"assembly": name, "error": f"{type(exc).__name__}"})
+                continue
+            scanned[name] = len(types)
+            for t in types:
+                try:
+                    tname = str(t.FullName)
+                except Exception:
+                    continue
+                if tname.startswith("<"):
+                    continue
+                for kind in ("GetMethods", "GetProperties", "GetFields"):
+                    try:
+                        members = getattr(t, kind)(flags)
+                    except Exception:
+                        continue
+                    for m in members:
+                        try:
+                            member_name = str(m.Name)
+                        except Exception:
+                            continue
+                        if needle and needle not in member_name.lower():
+                            continue
+                        row = {"type": tname, "member": member_name, "kind": kind[3:]}
+                        if kind == "GetMethods":
+                            try:
+                                row["static"] = bool(m.IsStatic)
+                                row["params"] = len(m.GetParameters())
+                                row["returns"] = str(m.ReturnType.Name)
+                            except Exception:
+                                pass
+                        hits.append(row)
+        hits.sort(key=lambda r: (r["type"], r["kind"], r["member"]))
+        return {"pattern": pattern, "scanned_assemblies": scanned,
+                "hit_count": len(hits), "hits": hits[:300],
+                "skipped_assemblies": skipped}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
