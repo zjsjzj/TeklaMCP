@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.1"
+__version__ = "2.3.2"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2714,7 +2714,7 @@ def tekla_update_spiral(guids: str = "", params: str = "", confirm: bool = False
 def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0,1",
                        remove: str = "below", thickness: float = 800.0,
                        half_size: float = 8000.0, keep_tool: bool = True,
-                       confirm: bool = False) -> dict:
+                       tool_class: str = "", confirm: bool = False) -> dict:
     """用平面切割零件（等效 Tekla 的“切割”命令），只保留要保留的一侧。
 
     point/normal 定义平面；remove=below 表示切除法向负侧（如 normal=0,0,1 → 切掉 z 以下）。
@@ -2735,11 +2735,18 @@ def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0
             return {"error": "没有匹配的对象", "invalid_guids": invalid,
                     "not_found_guids": not_found}
 
+        # 布尔运算的“操作件”必须放在 Tekla 保留类里，否则 set_OperativePart 抛
+        # ArgumentException: Boolean operative part's class is not BooleanOperativeClass。
+        # 保留类名由静态字段 BooleanPart.BooleanOperativeClassName 给出，不要硬编码。
+        operative_class = str(_safe(BooleanPart, "BooleanOperativeClassName", "") or "999")
+        if str(tool_class).strip():
+            operative_class = str(tool_class).strip()
+
         def make_tool(offset):
             part, _kind = _new_part("contour_plate")
             part.Profile.ProfileString = f"PL{thickness:g}"
             part.Material.MaterialString = "Q235B"
-            part.Class = "999"
+            part.Class = operative_class
             part.Name = "CUT-TOOL"
             _add_contour_points(part, _cut_plate_points(origin_xyz, normal_xyz,
                                                         half_size, offset))
@@ -2826,7 +2833,8 @@ def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0
                 _model().CommitChanges()
             except Exception:
                 pass
-        return {"dry_run": False, "cut": cut, "failed": len(objects) - cut,
+        return {"dry_run": False, "operative_class": operative_class,
+                "cut": cut, "failed": len(objects) - cut,
                 "committed": committed, "failures": failures, "after": after,
                 "tool_kept": bool(keep_tool),
                 "tool_guid": _guid_of(tool) if keep_tool else tool_guid}
