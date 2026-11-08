@@ -93,6 +93,20 @@ python -m venv .venv
 
 **建模类（v2.1.0 新增）** —— 让 AI 直接把构件画进模型
 
+**v2.2.0 新增：螺旋梁（SpiralBeam）**
+
+`tekla_create_parts` 支持 `type: "spiral" / "螺旋梁"`：
+
+```json
+{"type": "spiral", "profile": "RHS300*100*10", "class": "8", "name": "内环梁",
+ "start": "600,0,-2.4", "end": "0,-600,2950",
+ "radius": 600, "turns": 0.75, "pitch": 3936.5, "axis": "0,0,0"}
+```
+
+- `radius` 半径、`turns` 圈数（与 `pitch` 螺距二选一即可）、`axis` 旋转轴心点（默认原点）、`direction` 是否顺时针；
+- 属性名在不同 Tekla 版本略有差异，服务端按候选名逐个匹配（`Radius/Turns/Pitch/RotationAxis…`），实际生效项会在返回的 `spiral` 字段里列出，未匹配的进 `spiral_missing`；
+- 不确定本机属性名时，先调用只读工具 **`tekla_spiral_api_info`**（`probe=true` 会更进一步尝试赋值），它不写模型，返回该类可用的螺旋属性清单。
+
 | 工具 | 作用 | 状态 |
 |---|---|---|
 | `tekla_create_parts` | 批量创建梁/柱/折梁/多边形板/墙板/基础（JSON 数组，单次 50 条） | ✅ 2026-11-08 真实模型验证 |

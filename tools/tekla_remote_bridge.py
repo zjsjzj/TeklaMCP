@@ -185,7 +185,7 @@ def self_test():
                                  "tekla_modify_parts", "tekla_delete_objects")
                if name not in registry]
     if missing:
-        print(f"缺少工具: {missing}（当前 tekla_server.py 不是 v2.1.0）")
+        print(f"缺少工具: {missing}（当前 tekla_server.py 不是 v2.1.0+）")
         return 2
     result = call_tool({"tool": "tekla_check_connection", "args": {}})
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -38,6 +38,36 @@ class ModelingTestCase(unittest.TestCase):
         fake_tekla.reset()
 
     # ------------------------------------------------------------------
+    # 螺旋梁
+    # ------------------------------------------------------------------
+    def test_spiral_beam_creation(self):
+        spec = {"type": "spiral", "profile": "RHS300*100*10", "name": "内环梁",
+                "start": "600,0,-2.4", "end": "0,-600,2950",
+                "radius": 600, "turns": 0.75, "pitch": 3936.5, "axis": "0,0,0"}
+        preview = ts.tekla_create_parts(json.dumps([spec]))
+        self.assertTrue(preview["dry_run"])
+        self.assertEqual(preview["valid"], 1)
+        self.assertEqual(preview["items"][0]["type"], "spiral")
+        self.assertEqual(preview["items"][0]["radius"], 600)
+
+        result = ts.tekla_create_parts(json.dumps([spec]), confirm=True)
+        self.assertEqual(result["created"], 1)
+        parts = [o for o in fake_tekla.MODEL.objects.values()
+                 if isinstance(o, fake_tekla.SpiralBeam)]
+        self.assertEqual(len(parts), 1)
+        self.assertAlmostEqual(parts[0].Radius, 600.0)
+        self.assertAlmostEqual(parts[0].Turns, 0.75)
+        self.assertAlmostEqual(parts[0].Pitch, 3936.5)
+        self.assertEqual(parts[0].Name, "内环梁")
+
+    def test_spiral_beam_chinese_alias(self):
+        spec = {"type": "螺旋梁", "profile": "RHS300*100*10",
+                "start": "0,0,0", "end": "0,-600,2950", "radius": 600}
+        result = ts.tekla_create_parts(json.dumps([spec]), confirm=True)
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(result["created_items"][0]["type"], "spiral")
+
+    # ------------------------------------------------------------------
     # 创建构件
     # ------------------------------------------------------------------
     def test_dry_run_does_not_insert(self):

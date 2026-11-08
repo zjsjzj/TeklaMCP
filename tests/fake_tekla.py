@@ -136,6 +136,20 @@ class PolyBeam(Part):
         self.Contour.AddContourPoint(contour_point)
 
 
+class SpiralBeam(Part):
+    """螺旋梁（Tekla 2016+ Open API 类型），只保留建模用到的螺旋参数。"""
+
+    def __init__(self):
+        super().__init__()
+        self.StartPoint = Point()
+        self.EndPoint = Point()
+        self.Radius = 0.0
+        self.Turns = 0.0
+        self.Pitch = 0.0
+        self.StartAngle = 0.0
+        self.RotationAxis = None
+
+
 class ContourPlate(Part):
     def __init__(self):
         super().__init__()
@@ -366,6 +380,7 @@ def install():
     model = _module("Tekla.Structures.Model",
                     Model=Model, ModelObject=ModelObject, Part=Part, Beam=Beam,
                     PolyBeam=PolyBeam, ContourPlate=ContourPlate,
+                    SpiralBeam=SpiralBeam,
                     Contour=Contour, ContourPoint=ContourPoint,
                     Chamfer=Chamfer, Position=Position,
                     Component=Component, Connection=Connection, Detail=Detail,

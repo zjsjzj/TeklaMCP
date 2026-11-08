@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -653,6 +653,8 @@ _PART_KIND_ALIASES = {
     "polybeam": "polybeam", "折梁": "polybeam", "ply": "polybeam",
     "contour_plate": "contour_plate", "板": "contour_plate", "钢板": "contour_plate",
     "多边形板": "contour_plate", "cpl": "contour_plate",
+    "spiral": "spiral", "spiralbeam": "spiral", "螺旋梁": "spiral",
+    "螺旋": "spiral", "helix": "spiral", "spr": "spiral",
 }
 _PART_KINDS = {
     "beam": ("beam", "BEAM"),
@@ -662,6 +664,7 @@ _PART_KINDS = {
     "strip_footing": ("beam", "STRIP_FOOTING"),
     "polybeam": ("polybeam", None),
     "contour_plate": ("contour_plate", None),
+    "spiral": ("spiral", None),
 }
 _PLANE_ENUM = {"middle": "MIDDLE", "left": "LEFT", "right": "RIGHT"}
 _ROTATION_ENUM = {"front": "FRONT", "top": "TOP", "back": "BACK", "bottom": "BOTTOM"}
@@ -735,6 +738,61 @@ def _enum_member(enum_type, text, label, mapping):
     return getattr(enum_type, mapping[key])
 
 
+# 螺旋梁属性候选名（不同 Tekla 版本命名略有差异，逐个尝试）
+_SPIRAL_PROP_CANDIDATES = {
+    "radius": ("Radius", "Radius2", "R"),
+    "turns": ("Turns", "NumberOfTurns", "TurnCount", "Rotations"),
+    "pitch": ("Pitch", "Height", "Rise", "TotalRise", "HeightPerTurn"),
+    "axis": ("RotationAxis", "AxisLine", "Axis", "CenterAxis", "RotationAxisLine"),
+    "direction": ("RotationDirection", "Direction", "Clockwise", "IsClockwise"),
+    "start_angle": ("StartAngle", "Angle", "StartRotation"),
+}
+
+
+def _spiral_beam_class():
+    """取 SpiralBeam 类；老版本/未安装时给出可读错误。"""
+    try:
+        from Tekla.Structures.Model import SpiralBeam
+        return SpiralBeam
+    except Exception as exc:  # pragma: no cover - 依赖真实 Tekla
+        try:
+            import Tekla.Structures.Model as _m
+            return getattr(_m, "SpiralBeam")
+        except Exception:
+            raise RuntimeError(
+                "当前 Open API 没有 SpiralBeam 类型（需 Tekla 2016+）："
+                f"{type(exc).__name__}: {exc}") from exc
+
+
+def _apply_spiral_parameters(part, spec, label):
+    """把 radius / turns / pitch / axis / direction 写入 SpiralBeam，返回实际生效项。"""
+    applied, missing = {}, []
+    for key, names in _SPIRAL_PROP_CANDIDATES.items():
+        if spec.get(key) in (None, ""):
+            continue
+        value = spec[key]
+        done = False
+        for name in names:
+            if hasattr(part, name):
+                try:
+                    if key == "axis":
+                        value = _parse_point(value, f"{label}.axis")
+                    elif key == "direction":
+                        value = bool(value) if isinstance(value, bool) else (
+                            str(value).lower() in ("1", "true", "cw", "clockwise", "顺", "顺时针"))
+                    elif key in ("radius", "turns", "pitch", "start_angle"):
+                        value = _as_float(value, f"{label}.{key}")
+                    setattr(part, name, value)
+                    applied[key] = name
+                    done = True
+                    break
+                except Exception:
+                    continue
+        if not done:
+            missing.append(key)
+    return applied, missing
+
+
 def _new_part(part_type):
     """按类型创建公开 API 的 Part 对象（不插入模型）。"""
     from Tekla.Structures.Model import Beam, ContourPlate, PolyBeam
@@ -754,6 +812,8 @@ def _new_part(part_type):
             part = Beam()
             part.Type = enum
             return part, kind
+    if family == "spiral":
+        return _spiral_beam_class()(), kind
     return (PolyBeam() if family == "polybeam" else ContourPlate()), kind
 
 
@@ -846,6 +906,11 @@ def _build_part(spec, label):
         part.EndPoint = _parse_point(spec.get("end"), f"{label}.end")
     attributes = _apply_part_attributes(part, spec)
     _apply_part_position(part, spec)
+    if kind == "spiral":
+        applied, missing = _apply_spiral_parameters(part, spec, label)
+        attributes["spiral"] = applied
+        if missing:
+            attributes["spiral_missing"] = missing
     return part, kind, attributes
 
 
@@ -857,6 +922,9 @@ def _part_preview(spec, kind, attributes):
         preview["start"] = spec.get("start")
         preview["end"] = spec.get("end")
     preview.update({k: v for k, v in attributes.items() if v})
+    for key in ("radius", "turns", "pitch", "axis", "direction", "start_angle"):
+        if spec.get(key) not in (None, ""):
+            preview[key] = spec[key]
     for key in ("plane", "plane_offset", "rotation", "rotation_offset",
                 "depth", "depth_offset"):
         if spec.get(key) not in (None, ""):
@@ -885,6 +953,53 @@ def tekla_check_connection() -> dict:
         return result
     except Exception as exc:
         return {"connected": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@server.tool()
+@_synchronized
+def tekla_spiral_api_info(probe: bool = False) -> dict:
+    """查看本机 Open API 的 SpiralBeam（螺旋梁）类可用属性。
+
+    用于确认不同 Tekla 版本里螺旋参数的真实属性名（Radius/Turns/Pitch/Axis…）。
+    probe=True 时还会尝试创建一个**不插入模型**的临时对象，报告能被赋值的属性。
+    不会写模型，可安全反复调用。
+    """
+    try:
+        cls = _spiral_beam_class()
+        inst = cls()
+        members = sorted(m for m in dir(inst) if not m.startswith("_"))
+        has = {key: [n for n in names if hasattr(inst, n)]
+               for key, names in _SPIRAL_PROP_CANDIDATES.items()}
+        result = {
+            "available": True,
+            "class": str(cls),
+            "has_spiral_properties": has,
+            "missing_everywhere": [k for k, v in has.items() if not v],
+            "candidate_members": [m for m in members
+                                  if any(word in m.lower() for word in
+                                         ("spiral", "radius", "turn", "pitch", "axis", "rise", "height", "angle"))],
+            "member_count": len(members),
+        }
+        if probe:
+            writes = {}
+            for key, names in _SPIRAL_PROP_CANDIDATES.items():
+                for name in names:
+                    if hasattr(inst, name):
+                        try:
+                            probe_value = 600.0 if key == "radius" else (
+                                0.75 if key == "turns" else (3936.5 if key == "pitch" else
+                                (0.0 if key == "start_angle" else
+                                 (None if key == "axis" else True))))
+                            if probe_value is not None:
+                                setattr(inst, name, probe_value)
+                            writes[key] = name
+                            break
+                        except Exception as exc:
+                            writes[key] = f"{name} (失败: {type(exc).__name__})"
+            result["probe_writes"] = writes
+        return result
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 @server.tool()
@@ -1456,7 +1571,10 @@ def tekla_create_parts(parts: str, confirm: bool = False) -> dict:
 
     parts 是 JSON 数组，单次最多 50 条。每条至少包含：
       type       beam(默认) / column / polybeam / contour_plate / panel /
-                 pad_footing / strip_footing（也接受 梁/柱/板/折梁 等中文）
+                 pad_footing / strip_footing / spiral（螺旋梁）
+                 （也接受 梁/柱/板/折梁/螺旋梁 等中文）
+      ★ spiral（螺旋梁）额外参数：radius 半径、turns 圈数 或 pitch 螺距(mm/圈)、
+                 axis 旋转轴心点 [x,y,z]（默认原点）、direction 是否顺时针、start_angle 起始角
       profile    规格，如 "HEA200"、"PL10"、"RHS300*200*6"（必填）
       start/end  beam 类构件的起止点："6000,0,0" 或 [6000,0,0]
       points     polybeam / contour_plate 的坐标数组

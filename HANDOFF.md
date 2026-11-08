@@ -3,7 +3,7 @@
 > 写给在新电脑上继续开发的人（也可能是未来的自己）。
 > 本文档自包含：读完这一份就能接着干，不需要原电脑上的任何上下文。
 >
-> 版本：服务端 v2.1.0（2026-11-07，新增建模/组件工具）
+> 版本：服务端 v2.2.0（2026-11-08，新增螺旋梁 SpiralBeam + API 探测工具）
 > 验证环境：Windows 11 / Tekla Structures 2026.0 / Python 3.13 / pythonnet 3.2.1 / mcp 2.3.0
 
 ---
@@ -65,7 +65,18 @@
 - ✅ UDA 写入链路实测（set→读回→还原，未调 CommitChanges 时磁盘不变）。
 - ✅ `install.ps1` 合并写配置实测（预置其它 MCP 服务不被冲掉）。
 
-### v2.1.0 新增（2026-11-07）
+### v2.2.0 新增（2026-11-08）
+
+- ✅ `tekla_create_parts` 支持 `spiral / 螺旋梁`（Tekla 2016+ 的 `SpiralBeam`）：
+  `radius`、`turns`/`pitch`、`axis`、`direction`、`start_angle`；属性名按候选表逐个匹配，
+  返回里给出实际生效的属性（`spiral`）与没匹配上的（`spiral_missing`）。
+- ✅ 新增只读工具 `tekla_spiral_api_info(probe=False)`：返回本机 `SpiralBeam` 类的成员清单与
+  候选属性命中情况，用来在不同 Tekla 版本上确认属性命名；`probe=True` 时对不插入模型的临时
+  对象尝试赋值，报告哪些写得进去。不写模型，可安全反复调用。
+- ✅ 单测 `tests/test_modeling.py::test_spiral_beam_creation` / `test_spiral_beam_chinese_alias`
+  （`tests/fake_tekla.py` 增加 `SpiralBeam` 仿真类），全部 28 个用例通过。
+- ⚠️ 仍需真实模型回归：不同版本 `SpiralBeam` 的属性名/必填项可能不同，首次使用请先跑
+  `tekla_spiral_api_info(probe=true)`，再按返回结果调整。
 
 - ✅ 建模/组件工具已实现并注册：`tekla_create_parts`、`tekla_create_components`、
   `tekla_modify_parts`、`tekla_delete_objects`。全部「先预览、再 `confirm=True`」，
