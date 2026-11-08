@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.6"
+__version__ = "2.3.7"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2359,8 +2359,19 @@ def tekla_create_drawings(kind: str = "single_part", scope: str = "selected",
         from Tekla.Structures.Drawing import AssemblyDrawing, SinglePartDrawing
 
         created, errors, created_items = 0, [], []
+        auto_closed = 0
         for position, o in pending:
             try:
+                # Tekla 只允许在没有打开图纸时 Insert；批量出图时若用户开着图纸，
+                # 会抛 "CannotInsertDrawingException: Drawing cannot be inserted when
+                # another drawing is active"。这里自动关掉当前图（不保存）再继续。
+                try:
+                    dhx = _drawing_handler()
+                    if dhx.GetActiveDrawing() is not None:
+                        if bool(dhx.CloseActiveDrawing(False)):
+                            auto_closed += 1
+                except Exception:
+                    pass
                 if kind == "assembly":
                     asm = _safe(o, "GetAssembly")
                     asm = asm() if callable(asm) else asm
@@ -2388,7 +2399,8 @@ def tekla_create_drawings(kind: str = "single_part", scope: str = "selected",
         result = dict(base, dry_run=False, created=created,
                       failed=len(pending) - created, committed=committed,
                       errors=errors, created_items=created_items,
-                      drawing_count_after=len(_all_drawings()))
+                      drawing_count_after=len(_all_drawings()),
+                      auto_closed_active_drawing=auto_closed)
         if unnumbered:
             result["hint"] = ("检测到未编号位置。工具已按位置去重，但 Tekla 可能仍只允许"
                               "创建一张；正式批量出图前请先执行编号(Numbering)。")
