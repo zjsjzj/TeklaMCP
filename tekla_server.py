@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.4"
+__version__ = "2.3.5"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2565,44 +2565,106 @@ def _numbering_summary() -> dict:
 @server.tool()
 @_synchronized
 def tekla_run_numbering(confirm: bool = False, timeout_seconds: int = 180) -> dict:
-    """对当前模型执行 Tekla 编号（Numbering）。
+    """对当前模型执行 Tekla 编号（Numbering），带多路径尝试与诊断。
 
     编号后零件/构件才有真实的 PART_POS/ASSEMBLY_POS，才能批量生成单件图与正式 BOM。
-    confirm=False 时只返回编号状态，不执行。timeout_seconds 用于等待后台编号任务。
+    Tekla 的编号 API 在不同版本/不同机器上有差异，这里依次尝试：
+      1) Operation.RunNumbering()
+      2) CommitChanges() 后再试
+      3) Model.Save() 后再试（模型未保存时编号可能被拒绝）
+      4) 关闭图纸后再试（图纸编辑器里无法编号）
+      5) 新线程里调用（规避调用线程限制）
+      6) Operation.RunMacro("RunNumbering")
+    confirm=False 时只返回编号状态与诊断，不执行。
     """
     try:
         _require_api()
         before = _numbering_summary()
-        if not confirm:
-            return {"dry_run": True, "before": before,
-                    "hint": "confirm=True 才会真正执行编号"}
-        if before["bom_ready"]:
-            return {"dry_run": False, "already_numbered": True, "before": before,
-                    "after": before}
-        attempt_errors = []
-        launched = False
-        # 首选：Operation.RunNumbering()（2021 及以后版本提供）
+        diag = {}
         try:
             from Tekla.Structures.Model.Operations import Operation
-            runner = _safe(Operation, "RunNumbering")
-            if callable(runner):
-                launched = bool(runner())
-            if not launched:
-                attempt_errors.append("Operation.RunNumbering() 返回 False")
+            diag["operation_members"] = sorted(
+                m for m in dir(Operation) if not m.startswith("_"))
+            diag["has_RunNumbering"] = hasattr(Operation, "RunNumbering")
+            diag["has_RunMacro"] = hasattr(Operation, "RunMacro")
+            diag["has_RunMacroFile"] = hasattr(Operation, "RunMacroFile")
         except Exception as exc:
-            attempt_errors.append(f"{type(exc).__name__}: {exc}")
-        # 备选：执行 Tekla 宏 RunNumbering
-        if not launched:
+            diag["operation_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            model = _model()
+            diag["model_save_members"] = sorted(
+                m for m in dir(model) if "ave" in m or "umb" in m)
+            diag["has_Model_Save"] = hasattr(model, "Save")
+        except Exception as exc:
+            diag["model_error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            dh = _drawing_handler()
+            diag["has_active_drawing"] = dh.GetActiveDrawing() is not None
+        except Exception as exc:
+            diag["drawing_error"] = f"{type(exc).__name__}: {exc}"
+
+        if not confirm:
+            return {"dry_run": True, "before": before, "diagnostics": diag,
+                    "hint": "confirm=True 才会真正执行编号"}
+        if before["bom_ready"]:
+            return {"dry_run": False, "already_numbered": True,
+                    "before": before, "after": before, "diagnostics": diag}
+
+        attempts = []
+
+        def attempt(name, fn):
             try:
-                from Tekla.Structures.Model.Operations import Operation
-                macro = _safe(Operation, "RunMacro")
-                if callable(macro):
-                    launched = bool(macro("RunNumbering"))
-                if not launched:
-                    attempt_errors.append("Operation.RunMacro('RunNumbering') 返回 False")
+                result = fn()
+                ok = bool(result)
+                attempts.append({"name": name, "ok": ok, "return": str(result)})
+                return ok
             except Exception as exc:
-                attempt_errors.append(f"{type(exc).__name__}: {exc}")
-        # 轮询等待后台编号结束（最多 timeout_seconds 秒）
+                attempts.append({"name": name, "ok": False,
+                                 "error": f"{type(exc).__name__}: {exc}"})
+                return False
+
+        def run_numbering():
+            from Tekla.Structures.Model.Operations import Operation
+            return Operation.RunNumbering()
+
+        launched = False
+        if diag.get("has_RunNumbering"):
+            launched = attempt("Operation.RunNumbering()", run_numbering)
+        else:
+            attempts.append({"name": "Operation.RunNumbering()", "ok": False,
+                             "error": "该方法在本机 API 中不存在"})
+        if not launched:
+            launched = attempt("CommitChanges()+RunNumbering()",
+                               lambda: (_model().CommitChanges(), run_numbering())[1])
+        if not launched and diag.get("has_Model_Save"):
+            launched = attempt("model.Save()+RunNumbering()",
+                               lambda: (_model().Save(), run_numbering())[1])
+        if not launched and diag.get("has_active_drawing"):
+            launched = attempt("CloseActiveDrawing+RunNumbering()",
+                               lambda: (_drawing_handler().CloseActiveDrawing(True),
+                                        run_numbering())[1])
+        if not launched:
+            def threaded():
+                box = {}
+                def worker():
+                    try:
+                        from Tekla.Structures.Model.Operations import Operation
+                        box["ok"] = bool(Operation.RunNumbering())
+                    except Exception as exc:
+                        box["err"] = f"{type(exc).__name__}: {exc}"
+                th = threading.Thread(target=worker, daemon=True)
+                th.start()
+                th.join(30)
+                if "err" in box:
+                    raise RuntimeError(box["err"])
+                return box.get("ok", False)
+            launched = attempt("thread.RunNumbering()", threaded)
+        if not launched and diag.get("has_RunMacro"):
+            launched = attempt("Operation.RunMacro('RunNumbering')",
+                               lambda: __import__(
+                                   "Tekla.Structures.Model.Operations",
+                                   fromlist=["Operation"]).Operation.RunMacro("RunNumbering"))
+
         waited = 0
         after = before
         deadline = max(5, min(int(timeout_seconds), 600))
@@ -2616,12 +2678,25 @@ def tekla_run_numbering(confirm: bool = False, timeout_seconds: int = 180) -> di
                 break
             time.sleep(2)
             waited += 2
-        return {"dry_run": False, "launched": launched, "waited_seconds": waited,
-                "before": before, "after": after,
-                "attempt_errors": attempt_errors,
-                "recommendation": ("" if after["bom_ready"] else
-                                   "编号未完成：请在 Tekla 界面 Ctrl+A → 右键“编号”，"
-                                   "或检查“编号设置”是否被设为手动/后台未执行。")}
+        if not launched:
+            # 最后一次兜底：有些环境编号任务是异步排队的，等一小会儿再看状态
+            time.sleep(5)
+            after = _numbering_summary()
+            if after["bom_ready"]:
+                launched = True
+
+        return {
+            "dry_run": False,
+            "launched": launched,
+            "waited_seconds": waited,
+            "before": before,
+            "after": after,
+            "attempts": attempts,
+            "diagnostics": diag,
+            "recommendation": ("" if after["bom_ready"] else
+                               "所有 API 路径均未启动编号：请在 Tekla 界面 Ctrl+A → 右键“编号”"
+                               "（或菜单 图纸与报表 → 编号），编号完成后可继续批量出图。"),
+        }
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -2738,7 +2813,16 @@ def tekla_api_probe(class_name: str = "Tekla.Structures.Model.BooleanPart",
             return {"error": "class_name 需要完整命名空间，如 Tekla.Structures.Model.BooleanPart"}
         module = __import__(module_name, fromlist=[attr])
         cls = getattr(module, attr)
-        inst = cls()
+        try:
+            inst = cls()
+        except Exception as exc:
+            # 抽象类/无参构造不可用（如 Part、Operation）：退回类级成员（含静态方法）
+            available = sorted(m for m in dir(cls) if not m.startswith("_"))
+            return {"class": str(cls), "instance": False,
+                    "note": f"无法实例化（{type(exc).__name__}: {exc}），以下为类级成员",
+                    "member_count": len(available), "members": available,
+                    "wanted": {name: ("存在" if hasattr(cls, name) else "缺失")
+                               for name in _split_names(members)}}
         available = sorted(m for m in dir(inst) if not m.startswith("_"))
         wanted = {name: ("存在" if hasattr(inst, name) else "缺失")
                   for name in _split_names(members)}

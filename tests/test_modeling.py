@@ -371,6 +371,22 @@ class RunNumberingTests(unittest.TestCase):
         import tekla_server as ts
         self.assertIn("tekla_run_numbering", ts.server.tools)
 
+    def test_missing_run_numbering_reports_reason(self):
+        """本机 API 没有 RunNumbering 时，attempts 要明确写"方法不存在"而不是含糊的 False。"""
+        ts, _ = self._fresh()
+        from Tekla.Structures.Model.Operations import Operation
+        saved = Operation.RunNumbering
+        del Operation.RunNumbering
+        try:
+            res = ts.tekla_run_numbering(confirm=True, timeout_seconds=5)
+        finally:
+            Operation.RunNumbering = saved
+        self.assertFalse(res["launched"])
+        self.assertFalse(res["diagnostics"]["has_RunNumbering"])
+        first = res["attempts"][0]
+        self.assertEqual(first["name"], "Operation.RunNumbering()")
+        self.assertIn("不存在", first["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
