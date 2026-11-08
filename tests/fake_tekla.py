@@ -164,8 +164,8 @@ class SpiralBeam(Part):
         return self._start
 
     @StartPoint.setter
-    def StartPoint(self, value):
-        raise TypeError("property is read-only")
+    def StartPoint(self, value):   # 实测可写：半径由起点到旋转轴的距离隐含
+        self._start = value
 
     @property
     def EndPoint(self):

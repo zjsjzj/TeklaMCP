@@ -42,8 +42,8 @@ class ModelingTestCase(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_spiral_beam_creation(self):
         spec = {"type": "spiral", "profile": "RHS300*100*10", "name": "内环梁",
-                "axis_base": "0,0,-2.4", "axis_dir": "0,0,1",
-                "radius": 600, "start_angle": 0,
+                "start": "600,0,-2.4", "axis_base": "0,0,-2.4",
+                "axis_up": "0,0,1000",
                 "rotation_angle": 270, "total_rise": 2952.4}
         preview = ts.tekla_create_parts(json.dumps([spec]))
         self.assertTrue(preview["dry_run"])
@@ -57,25 +57,27 @@ class ModelingTestCase(unittest.TestCase):
                  if isinstance(o, fake_tekla.SpiralBeam)]
         self.assertEqual(len(parts), 1)
         beam = parts[0]
+        self.assertAlmostEqual(beam.StartPoint.X, 600.0)
         self.assertAlmostEqual(beam.RotationAngle, 270.0)
         self.assertAlmostEqual(beam.TotalRise, 2952.4)
         self.assertAlmostEqual(beam.RotationAxisBasePoint.Z, -2.4)
-        self.assertAlmostEqual(beam.RotationAxisUpPoint.X, 600.0)
+        self.assertAlmostEqual(beam.RotationAxisUpPoint.Z, 1000.0)
         self.assertAlmostEqual(beam.RotationAxisDirection.Z, 1.0)
         self.assertEqual(beam.Name, "内环梁")
 
-    def test_spiral_beam_does_not_set_readonly_start_end(self):
-        """SpiralBeam 的 StartPoint/EndPoint 只读，传了也不应报错。"""
+    def test_spiral_beam_requires_start(self):
+        """螺旋梁必须给 start（半径由它到旋转轴的距离决定），且不写只读的 EndPoint。"""
         spec = {"type": "spiral", "profile": "RHS300*100*10",
                 "start": "600,0,-2.4", "end": "0,-600,2950",
-                "axis_base": "0,0,-2.4", "radius": 600,
+                "axis_base": "0,0,-2.4", "axis_up": "0,0,1000",
                 "rotation_angle": 270, "total_rise": 2952.4}
         result = ts.tekla_create_parts(json.dumps([spec]), confirm=True)
         self.assertEqual(result["created"], 1)
 
     def test_spiral_beam_chinese_alias(self):
         spec = {"type": "螺旋梁", "profile": "RHS300*100*10",
-                "axis_base": "0,0,0", "radius": 600, "rotation_angle": 270}
+                "start": "600,0,0", "axis_base": "0,0,0", "axis_up": "0,0,1000",
+                "rotation_angle": 270}
         result = ts.tekla_create_parts(json.dumps([spec]), confirm=True)
         self.assertEqual(result["created"], 1)
         self.assertEqual(result["created_items"][0]["type"], "spiral")

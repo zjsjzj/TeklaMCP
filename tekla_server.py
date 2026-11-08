@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.2.2"
+__version__ = "2.2.3"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -949,10 +949,11 @@ def _build_part(spec, label):
         points = _parse_points(spec.get("points"), f"{label}.points", minimum)
         _add_contour_points(part, points)
     elif kind == "spiral":
-        # 实测 Tekla 2026 的 SpiralBeam：StartPoint/EndPoint 只读，
-        # 几何由 旋转轴基点/方向/上方向点 + 转角 + 总升高 决定
-        if spec.get("axis_base") in (None, "") and spec.get("start") in (None, ""):
-            raise ValueError(f"{label}（螺旋梁）需要 axis_base（旋转轴基点）或 start 坐标")
+        # 实测 Tekla 2026：SpiralBeam.StartPoint 可写（半径由它到旋转轴的距离隐含），
+        # EndPoint / RotationAxisDirection 只读（由几何推出）
+        if spec.get("start") in (None, ""):
+            raise ValueError(f"{label}（螺旋梁）需要 start（螺旋起点，半径=它到旋转轴的距离）")
+        part.StartPoint = _parse_point(spec.get("start"), f"{label}.start")
     else:
         if spec.get("start") in (None, "") or spec.get("end") in (None, ""):
             raise ValueError(f"{label} 需要 start 与 end 坐标")
@@ -1702,7 +1703,8 @@ def tekla_create_parts(parts: str, confirm: bool = False) -> dict:
                  pad_footing / strip_footing / spiral（螺旋梁）
                  （也接受 梁/柱/板/折梁/螺旋梁 等中文）
       ★ spiral（螺旋梁）参数（Tekla 2026 实测 API）：
-                 axis_base 旋转轴基点 [x,y,z]（缺省取 start）、axis_dir 轴方向（默认 0,0,1）、
+                 start 螺旋起点（必须；半径 = 起点到旋转轴的距离）、
+                 axis_base 旋转轴基点 [x,y,z]（缺省取 start）、
                  axis_up 半径参考点（缺省由 radius+start_angle 推出，半径=|axis_up−axis_base|）、
                  rotation_angle 总转角(度)、total_rise 总升高(mm)、twist_start/twist_end 截面扭转角。
                  注意：SpiralBeam 的 StartPoint/EndPoint 是只读的，不要传。
