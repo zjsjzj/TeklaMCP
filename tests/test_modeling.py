@@ -331,3 +331,36 @@ class ModelingTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CutPlaneHelperTests(unittest.TestCase):
+    """平面切割辅助函数：轮廓点必须是 Tekla Point 且落在给定平面上。"""
+
+    def test_cut_plate_points_on_plane(self):
+        import tekla_server as ts
+
+        pts = ts._cut_plate_points((0.0, 0.0, 3058.0), (0.0, 0.0, 1.0), 8000.0, 0.0)
+        self.assertEqual(len(pts), 4)
+        for p in pts:
+            self.assertTrue(hasattr(p, "X"), "轮廓点必须是 Tekla Point 对象")
+            self.assertAlmostEqual(p.Z, 3058.0, places=6)
+        # 方形轮廓：对角线长度 = 2*sqrt(2)*half_size
+        import math
+        diag = math.dist((pts[0].X, pts[0].Y), (pts[2].X, pts[2].Y))
+        self.assertAlmostEqual(diag, 2 * math.sqrt(2) * 8000.0, places=1)
+
+    def test_cut_plate_points_offset_along_normal(self):
+        import tekla_server as ts
+
+        pts = ts._cut_plate_points((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 100.0, -400.0)
+        for p in pts:
+            self.assertAlmostEqual(p.Z, -400.0, places=6)
+
+    def test_vector_helpers(self):
+        import tekla_server as ts
+
+        self.assertAlmostEqual(ts._dot((1, 2, 3), (4, 5, 6)), 32.0)
+        n = ts._unit((0.0, 0.0, 5.0))
+        self.assertAlmostEqual(n[2], 1.0)
+        c = ts._cross((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+        self.assertAlmostEqual(c[2], 1.0)

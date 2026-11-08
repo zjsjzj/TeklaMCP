@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.2.3"
+__version__ = "2.3.1"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2544,3 +2544,291 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
 if __name__ == "__main__":
     log.info("启动 Tekla MCP Server (stdio)")
     server.run(transport="stdio")
+
+
+# ---------------------------------------------------------------------------
+# 螺旋梁参数修改 / 平面切割 / API 探测（V2.3.0）
+# ---------------------------------------------------------------------------
+def _solid_bbox(obj):
+    """取对象实体包围盒（AABB）；取不到返回 {}。"""
+    try:
+        solid = obj.GetSolid()
+    except Exception:
+        return {}
+    box = {}
+    for key, attr in (("min", "MinimumPoint"), ("max", "MaximumPoint")):
+        row = _point_row(_safe(solid, attr))
+        if row:
+            box[key] = row
+    return box
+
+
+def _unit(vector):
+    x, y, z = [float(v) for v in vector]
+    length = (x * x + y * y + z * z) ** 0.5
+    if length < 1e-9:
+        raise ValueError("normal 不能是零向量")
+    return x / length, y / length, z / length
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cut_plate_points(origin, normal, half_size, offset):
+    """生成切平面上的大方形轮廓（用于构造切割体）。"""
+    n = _unit(normal)
+    ref = (0.0, 0.0, 1.0) if abs(n[2]) < 0.9 else (1.0, 0.0, 0.0)
+    u = _unit(_cross(n, ref))
+    v = _cross(n, u)
+    points = []
+    for su, sv in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        points.append([round(origin[0] + offset * n[0] + half_size * (su * u[0] + sv * v[0]), 3),
+                       round(origin[1] + offset * n[1] + half_size * (su * u[1] + sv * v[1]), 3),
+                       round(origin[2] + offset * n[2] + half_size * (su * u[2] + sv * v[2]), 3)])
+    return [Point(*xyz) for xyz in points]
+
+
+def _tool_extent_along(tool, normal):
+    """切割体沿法向的投影范围 (min, max)，用于确认它落在要切除的一侧。"""
+    box = _solid_bbox(tool)
+    if not box:
+        return None
+    n = _unit(normal)
+    values = []
+    # AABB 的极值组合覆盖全部 8 个角点投影
+    xs = (box["min"]["x"], box["max"]["x"])
+    ys = (box["min"]["y"], box["max"]["y"])
+    zs = (box["min"]["z"], box["max"]["z"])
+    for x in xs:
+        for y in ys:
+            for z in zs:
+                values.append(_dot((x, y, z), n))
+    return min(values), max(values)
+
+
+@server.tool()
+@_synchronized
+def tekla_api_probe(class_name: str = "Tekla.Structures.Model.BooleanPart",
+                    members: str = "") -> dict:
+    """探测任意 Open API 类的成员（只读，不写模型）。members 逗号分隔可检查是否存在。"""
+    try:
+        _require_api()
+        module_name, _, attr = class_name.rpartition(".")
+        if not module_name:
+            return {"error": "class_name 需要完整命名空间，如 Tekla.Structures.Model.BooleanPart"}
+        module = __import__(module_name, fromlist=[attr])
+        cls = getattr(module, attr)
+        inst = cls()
+        available = sorted(m for m in dir(inst) if not m.startswith("_"))
+        wanted = {name: ("存在" if hasattr(inst, name) else "缺失")
+                  for name in _split_names(members)}
+        return {"class": str(cls), "member_count": len(available),
+                "members": available, "wanted": wanted}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@server.tool()
+@_synchronized
+def tekla_update_spiral(guids: str = "", params: str = "", confirm: bool = False) -> dict:
+    """修改已有螺旋梁的螺旋参数（不删除重建）。
+
+    params 为 JSON 对象，可用键：start / axis_base / axis_up / axis_dir / radius /
+    start_angle / rotation_angle / total_rise / twist_start / twist_end。
+    例：{"twist_start": 46.24, "twist_end": 46.24}
+    """
+    try:
+        _require_api()
+        spec = json.loads(params) if isinstance(params, str) and params.strip() else {}
+        if not isinstance(spec, dict) or not spec:
+            return {"error": "params 需要一个非空 JSON 对象"}
+        objects, invalid, not_found = _objects_from_guids(guids)
+        if not objects:
+            return {"error": "没有匹配的对象", "invalid_guids": invalid,
+                    "not_found_guids": not_found}
+        before = [{"guid": _guid_of(o),
+                   "StartPoint": _point_row(_safe(o, "StartPoint")),
+                   "EndPoint": _point_row(_safe(o, "EndPoint")),
+                   "TwistAngleStart": _safe(o, "TwistAngleStart"),
+                   "TwistAngleEnd": _safe(o, "TwistAngleEnd"),
+                   "TotalRise": _safe(o, "TotalRise"),
+                   "bbox": _solid_bbox(o)} for o in objects]
+        if not confirm:
+            return {"dry_run": True, "would_change": len(objects), "params": spec,
+                    "before": before,
+                    "message": "预览；确认后重新调用并传 confirm=True"}
+        attr_map = (("axis_base", "RotationAxisBasePoint"),
+                    ("axis_up", "RotationAxisUpPoint"),
+                    ("axis_dir", "RotationAxisDirection"),
+                    ("rotation_angle", "RotationAngle"),
+                    ("total_rise", "TotalRise"),
+                    ("twist_start", "TwistAngleStart"),
+                    ("twist_end", "TwistAngleEnd"))
+        changed, failures = 0, []
+        for obj in objects:
+            try:
+                merged = {}
+                for spec_key, attr in attr_map:
+                    value = _safe(obj, attr)
+                    if value is None:
+                        continue
+                    merged[spec_key] = ([value.X, value.Y, value.Z]
+                                        if hasattr(value, "X") else float(value))
+                merged.update(spec)
+                start = _safe(obj, "StartPoint")
+                if "start" not in merged and start is not None:
+                    merged["start"] = [start.X, start.Y, start.Z]
+                applied, missing = _apply_spiral_parameters(obj, merged,
+                                                            f"螺旋梁 {_guid_of(obj)}")
+                if missing:
+                    failures.append({"guid": _guid_of(obj), "missing": missing})
+                modifier = _safe(obj, "Modify")
+                if callable(modifier) and modifier() is False:
+                    raise RuntimeError("Modify 返回 False")
+                changed += 1
+            except Exception as exc:
+                failures.append({"guid": _guid_of(obj),
+                                 "error": f"{type(exc).__name__}: {exc}"})
+        committed = bool(_model().CommitChanges()) if changed else False
+        after = [{"guid": _guid_of(o), "StartPoint": _point_row(_safe(o, "StartPoint")),
+                  "EndPoint": _point_row(_safe(o, "EndPoint")),
+                  "bbox": _solid_bbox(o),
+                  "LENGTH": _report_num(o, "LENGTH"),
+                  "TOP_LEVEL": _report_str(o, "TOP_LEVEL"),
+                  "BOTTOM_LEVEL": _report_str(o, "BOTTOM_LEVEL")} for o in objects]
+        return {"dry_run": False, "changed": changed, "committed": committed,
+                "failures": failures, "after": after}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+@server.tool()
+@_synchronized
+def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0,1",
+                       remove: str = "below", thickness: float = 800.0,
+                       half_size: float = 8000.0, keep_tool: bool = True,
+                       confirm: bool = False) -> dict:
+    """用平面切割零件（等效 Tekla 的“切割”命令），只保留要保留的一侧。
+
+    point/normal 定义平面；remove=below 表示切除法向负侧（如 normal=0,0,1 → 切掉 z 以下）。
+    实现：在平面处建一个厚板作为切割体，用 BooleanPart(CUT) 切目标，再可选删除切割体。
+    """
+    try:
+        _require_api()
+        from Tekla.Structures.Model import BooleanPart
+        p = _parse_point(point, "point")
+        n = _parse_vector(normal, "normal")
+        origin_xyz = (p.X, p.Y, p.Z)
+        normal_xyz = _unit((n.X, n.Y, n.Z))
+        if str(remove).strip().lower() not in ("below", "above"):
+            return {"error": "remove 只能是 below（切除负侧）或 above（切除正侧）"}
+        sign = -1.0 if str(remove).strip().lower() == "below" else 1.0
+        objects, invalid, not_found = _objects_from_guids(guids)
+        if not objects:
+            return {"error": "没有匹配的对象", "invalid_guids": invalid,
+                    "not_found_guids": not_found}
+
+        def make_tool(offset):
+            part, _kind = _new_part("contour_plate")
+            part.Profile.ProfileString = f"PL{thickness:g}"
+            part.Material.MaterialString = "Q235B"
+            part.Class = "999"
+            part.Name = "CUT-TOOL"
+            _add_contour_points(part, _cut_plate_points(origin_xyz, normal_xyz,
+                                                        half_size, offset))
+            if not part.Insert():
+                raise RuntimeError("切割体 Insert 返回 False")
+            return part
+
+        shift = _dot(origin_xyz, normal_xyz)
+        wanted = (shift + sign * thickness, shift) if sign < 0 else (shift, shift + thickness)
+        wanted = (min(wanted), max(wanted))
+        tool = make_tool(0.0)
+        placed = False
+        offset = 0.0
+        extent = None
+        for _attempt in range(4):
+            extent = _tool_extent_along(tool, normal_xyz)
+            if extent is None:
+                break
+            if abs(extent[0] - wanted[0]) < 2 and abs(extent[1] - wanted[1]) < 2:
+                placed = True
+                break
+            # 厚板相对轮廓面的偏移约定各版本不同：按实测中心差逐次校正，
+            # 最多 4 次，使切割体正好落在要切除的一侧。
+            offset += ((wanted[0] + wanted[1]) - (extent[0] + extent[1])) / 2.0
+            try:
+                tool.Delete()
+            except Exception:
+                pass
+            tool = make_tool(offset)
+        if not placed:
+            try:
+                tool.Delete()
+            except Exception:
+                pass
+            return {"error": "切割体方向无法自动判定，未执行切割（模型未改动）",
+                    "tool_extent": extent, "wanted_extent": wanted}
+        preview = [{"guid": _guid_of(o), "bbox": _solid_bbox(o),
+                    "LENGTH": _report_num(o, "LENGTH")} for o in objects]
+        if not confirm:
+            try:
+                tool.Delete()
+            except Exception:
+                pass
+            return {"dry_run": True, "would_cut": len(objects),
+                    "plane": {"point": origin_xyz, "normal": normal_xyz,
+                              "remove": remove, "thickness": thickness},
+                    "before": preview,
+                    "message": "预览；确认后重新调用并传 confirm=True"}
+
+        cut, failures = 0, []
+        for obj in objects:
+            try:
+                boolean = BooleanPart()
+                father_ok = _try_set(boolean, "Father", obj)
+                if father_ok != "可写":
+                    _try_set(boolean, "Part", obj)
+                setter = _safe(boolean, "SetOperativePart")
+                if callable(setter):
+                    setter(tool)
+                else:
+                    _try_set(boolean, "OperativePart", tool)
+                type_enum = _safe(BooleanPart, "BooleanTypeEnum")
+                if type_enum is not None:
+                    boolean.Type = type_enum.CUT
+                if boolean.Insert() is False:
+                    raise RuntimeError("BooleanPart.Insert 返回 False")
+                modifier = _safe(obj, "Modify")
+                if callable(modifier) and modifier() is False:
+                    raise RuntimeError("Modify 返回 False")
+                cut += 1
+            except Exception as exc:
+                failures.append({"guid": _guid_of(obj),
+                                 "error": f"{type(exc).__name__}: {exc}"})
+        committed = bool(_model().CommitChanges()) if cut else False
+        after = [{"guid": _guid_of(o), "bbox": _solid_bbox(o),
+                  "LENGTH": _report_num(o, "LENGTH"),
+                  "TOP_LEVEL": _report_str(o, "TOP_LEVEL"),
+                  "BOTTOM_LEVEL": _report_str(o, "BOTTOM_LEVEL")} for o in objects]
+        tool_guid = None
+        if cut and not keep_tool:
+            try:
+                tool_guid = _guid_of(tool)
+                tool.Delete()
+                _model().CommitChanges()
+            except Exception:
+                pass
+        return {"dry_run": False, "cut": cut, "failed": len(objects) - cut,
+                "committed": committed, "failures": failures, "after": after,
+                "tool_kept": bool(keep_tool),
+                "tool_guid": _guid_of(tool) if keep_tool else tool_guid}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
