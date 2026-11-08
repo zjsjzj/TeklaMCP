@@ -364,3 +364,44 @@ class CutPlaneHelperTests(unittest.TestCase):
         self.assertAlmostEqual(n[2], 1.0)
         c = ts._cross((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
         self.assertAlmostEqual(c[2], 1.0)
+
+
+class BooleanTypeEnumTests(unittest.TestCase):
+    """BooleanTypeEnum 的成员名随版本变化，选择逻辑必须容忍 CUT/DIFFERENCE 等命名。"""
+
+    def test_enum_names_filters_dunders(self):
+        import tekla_server as ts
+
+        class FakeEnum:
+            CUT_PART = 1
+            ADD = 2
+            __members__ = {"CUT_PART": 1}
+
+        self.assertEqual(ts._enum_names(FakeEnum), ["ADD", "CUT_PART"])
+
+    def test_cut_type_prefers_cut(self):
+        import tekla_server as ts
+
+        class FakeEnum:
+            CUT = 1
+            ADD = 2
+
+        self.assertEqual(ts._boolean_cut_type(FakeEnum), 1)
+
+    def test_cut_type_falls_back_to_keyword(self):
+        import tekla_server as ts
+
+        class FakeEnum:
+            JOIN = 1
+            DIFFERENCE = 2
+
+        self.assertEqual(ts._boolean_cut_type(FakeEnum), 2)
+
+    def test_cut_type_returns_none_when_missing(self):
+        import tekla_server as ts
+
+        class FakeEnum:
+            UNION = 1
+            INTERSECT = 2
+
+        self.assertIsNone(ts._boolean_cut_type(FakeEnum))

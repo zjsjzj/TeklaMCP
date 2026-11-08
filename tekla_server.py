@@ -176,7 +176,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.2"
+__version__ = "2.3.3"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -2581,6 +2581,34 @@ def _dot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
+def _enum_names(enum_type):
+    """枚举的有效成员名（去掉 __xxx__ 与 value__）。"""
+    try:
+        names = [m for m in dir(enum_type) if not m.startswith("_")]
+    except Exception:
+        return []
+    return [m for m in names if m != "value__"]
+
+
+def _boolean_cut_type(enum_type):
+    """在 BooleanTypeEnum 里选“切除/差集”成员。
+
+    Tekla 2026 实测：成员名不是 CUT（会抛 AttributeError），故按候选表 + 关键字匹配，
+    避免版本差异导致布尔切割整条链不可用。
+    """
+    candidates = ("CUT", "CUT_PART", "CUTPART", "DIFFERENCE", "SUBTRACT",
+                  "SUBTRACTION", "SUB", "REMOVE")
+    for name in candidates:
+        if hasattr(enum_type, name):
+            return getattr(enum_type, name)
+    keywords = ("CUT", "DIFF", "SUBTR", "REMOV", "MINUS")
+    for name in _enum_names(enum_type):
+        upper = name.upper()
+        if any(k in upper for k in keywords):
+            return getattr(enum_type, name)
+    return None
+
+
 def _cut_plate_points(origin, normal, half_size, offset):
     """生成切平面上的大方形轮廓（用于构造切割体）。"""
     n = _unit(normal)
@@ -2796,6 +2824,7 @@ def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0
                     "before": preview,
                     "message": "预览；确认后重新调用并传 confirm=True"}
 
+        bool_types = _enum_names(_safe(BooleanPart, "BooleanTypeEnum"))
         cut, failures = 0, []
         for obj in objects:
             try:
@@ -2810,7 +2839,12 @@ def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0
                     _try_set(boolean, "OperativePart", tool)
                 type_enum = _safe(BooleanPart, "BooleanTypeEnum")
                 if type_enum is not None:
-                    boolean.Type = type_enum.CUT
+                    cut_type = _boolean_cut_type(type_enum)
+                    if cut_type is None:
+                        raise RuntimeError(
+                            "BooleanTypeEnum 找不到“切除”成员，可选值: "
+                            + ", ".join(_enum_names(type_enum)))
+                    boolean.Type = cut_type
                 if boolean.Insert() is False:
                     raise RuntimeError("BooleanPart.Insert 返回 False")
                 modifier = _safe(obj, "Modify")
@@ -2834,6 +2868,7 @@ def tekla_cut_by_plane(guids: str = "", point: str = "0,0,0", normal: str = "0,0
             except Exception:
                 pass
         return {"dry_run": False, "operative_class": operative_class,
+                "boolean_types": bool_types,
                 "cut": cut, "failed": len(objects) - cut,
                 "committed": committed, "failures": failures, "after": after,
                 "tool_kept": bool(keep_tool),
