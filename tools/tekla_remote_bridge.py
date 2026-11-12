@@ -50,10 +50,31 @@ def tool_registry():
     return registry
 
 
+def _read_file_diag(args):
+    """只读诊断：返回文件大小与首尾字节，用于判断导出文件的真实格式。"""
+    path = str(args.get("path") or "")
+    try:
+        n = max(1, min(int(args.get("n") or 64), 4096))
+    except (TypeError, ValueError):
+        n = 64
+    if not path or not os.path.isfile(path):
+        return {"ok": False, "error": f"file not found: {path}"}
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(n)
+        f.seek(max(0, size - n))
+        tail = f.read(n)
+    return {"ok": True, "path": path, "size": size,
+            "head_hex": head.hex(), "head_repr": repr(head),
+            "tail_hex": tail.hex(), "tail_repr": repr(tail)}
+
+
 def call_tool(payload):
-    registry = tool_registry()
     tool = str(payload.get("tool") or "")
     args = payload.get("args") or {}
+    if tool == "__read_file__":
+        return _read_file_diag(args)
+    registry = tool_registry()
     if tool not in registry:
         return {"ok": False, "error": f"未知工具 {tool!r}", "tools": sorted(registry)}
     if not isinstance(args, dict):
