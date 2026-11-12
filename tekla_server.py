@@ -2490,6 +2490,31 @@ def tekla_delete_drawings(drawing_mark: str = "", drawing_name: str = "",
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _installed_printers():
+    """列出 Windows 已安装打印机（只读）。失败返回空列表。"""
+    try:
+        import clr
+        clr.AddReference("System.Drawing")
+        from System.Drawing.Printing import PrinterSettings
+        return [str(x) for x in PrinterSettings.InstalledPrinters]
+    except Exception:
+        return []
+
+
+def _find_pdf_printer():
+    """挑一个能出 PDF 的打印机。PrintDrawing 的输出格式由打印机决定：
+    默认打印机可能输出 PWG 光栅（RaS2）而非 PDF，必须显式选 PDF 打印机。"""
+    printers = _installed_printers()
+    lowered = [(x, x.lower()) for x in printers]
+    for name, low in lowered:
+        if "microsoft print to pdf" in low:
+            return name
+    for name, low in lowered:
+        if "pdf" in low:
+            return name
+    return ""
+
+
 @server.tool()
 @_synchronized
 def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
@@ -2517,8 +2542,9 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
         out_dir = output_dir or os.path.join(_EXPORT_DIR, "pdf")
         os.makedirs(out_dir, exist_ok=True)
         pa = PrintAttributes()
-        if printer:
-            pa.PrinterInstance = printer
+        effective_printer = (printer or "").strip() or _find_pdf_printer()
+        if effective_printer:
+            pa.PrinterInstance = effective_printer
 
         results = []
         for d in targets:
@@ -2548,6 +2574,8 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
         succeeded = sum(1 for r in results if r["ok"])
         return {"output_dir": out_dir, "count": len(results),
                 "succeeded": succeeded, "failed": len(results) - succeeded,
+                "printer_used": effective_printer,
+                "installed_printers": _installed_printers(),
                 "results": results}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
