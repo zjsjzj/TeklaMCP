@@ -2490,6 +2490,31 @@ def tekla_delete_drawings(drawing_mark: str = "", drawing_name: str = "",
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _wait_pdf_ready(path, timeout=20.0):
+    """DPM 出图可能是异步写盘：等文件出现且大小稳定，返回 (size, 头5字节)。"""
+    import time as _t
+    deadline = _t.time() + timeout
+    last = -1
+    size = 0
+    header = b""
+    while _t.time() < deadline:
+        if os.path.isfile(path):
+            size = os.path.getsize(path)
+            if size >= 5:
+                with open(path, "rb") as f:
+                    header = f.read(5)
+                if header == b"%PDF-" and size == last and size > 0:
+                    return size, header
+            last = size
+        _t.sleep(0.4)
+    if os.path.isfile(path):
+        size = os.path.getsize(path)
+        if size >= 5:
+            with open(path, "rb") as f:
+                header = f.read(5)
+    return size, header
+
+
 def _installed_printers():
     """列出 Windows 已安装打印机（只读）。失败返回空列表。"""
     try:
@@ -2537,14 +2562,14 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
         if not targets:
             return {"error": "没有可导出的图纸"}
 
-        from Tekla.Structures.Drawing import PrintAttributes
+        # Tekla 2026：PrintAttributes + PrinterInstance 走打印设备，输出的是
+        # PWG 光栅（RaS2）而不是 PDF。真正的 PDF 导出要用 DPM/DotPrint 子系统：
+        # DPMPrinterAttributes.OutputType = DotPrintOutputType.PDF + OutputFileName。
+        from Tekla.Structures.Drawing import (DPMPrinterAttributes,
+                                              DotPrintOutputType)
 
         out_dir = output_dir or os.path.join(_EXPORT_DIR, "pdf")
         os.makedirs(out_dir, exist_ok=True)
-        pa = PrintAttributes()
-        effective_printer = (printer or "").strip() or _find_pdf_printer()
-        if effective_printer:
-            pa.PrinterInstance = effective_printer
 
         results = []
         for d in targets:
@@ -2554,18 +2579,27 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
             base = _safe_filename(f"{name}_{suffix}")
             path = _available_path(os.path.join(out_dir, f"{base}.pdf"), overwrite)
             try:
-                api_ok = bool(dh.PrintDrawing(d, pa, path))
-                exists = os.path.isfile(path)
-                size = os.path.getsize(path) if exists else 0
-                header = b""
-                if exists and size >= 5:
-                    with open(path, "rb") as f:
-                        header = f.read(5)
-                valid = api_ok and size > 5 and header == b"%PDF-"
+                attrs = DPMPrinterAttributes()
+                attrs.OutputType = DotPrintOutputType.PDF
+                attrs.OutputFileName = path
+                for prop, val in (("OpenFileWhenFinished", False),):
+                    try:
+                        setattr(attrs, prop, val)
+                    except Exception:
+                        pass
+                if printer:
+                    try:
+                        attrs.PrinterName = printer
+                    except Exception:
+                        pass
+                api_ok = bool(dh.PrintDrawing(d, attrs))
+                size, header = _wait_pdf_ready(path)
+                valid = size > 5 and header == b"%PDF-"
                 item = {"drawing": name, "drawing_mark": mark, "path": path,
                         "ok": valid, "api_ok": api_ok, "bytes": size}
                 if not valid:
-                    item["error"] = "PrintDrawing 返回成功但 PDF 文件无效" if api_ok else "PrintDrawing 返回 False"
+                    item["error"] = ("输出不是有效 PDF（可能仍在写入或格式不对）"
+                                     if size else "未生成文件")
                 results.append(item)
             except Exception as exc:
                 results.append({"drawing": name, "drawing_mark": mark, "path": path,
@@ -2574,8 +2608,7 @@ def tekla_export_drawings_pdf(drawing_mark: str = "", drawing_name: str = "",
         succeeded = sum(1 for r in results if r["ok"])
         return {"output_dir": out_dir, "count": len(results),
                 "succeeded": succeeded, "failed": len(results) - succeeded,
-                "printer_used": effective_printer,
-                "installed_printers": _installed_printers(),
+                "method": "DPMPrinterAttributes.OutputType=PDF",
                 "results": results}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
