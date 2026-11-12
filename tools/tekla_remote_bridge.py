@@ -69,11 +69,30 @@ def _read_file_diag(args):
             "tail_hex": tail.hex(), "tail_repr": repr(tail)}
 
 
+def _list_printers_diag(args):
+    """只读诊断：列出 Windows 已安装打印机，用于找 PDF 打印机。"""
+    try:
+        import clr
+        clr.AddReference("System.Drawing")
+        from System.Drawing.Printing import PrinterSettings
+        printers = [str(p) for p in PrinterSettings.InstalledPrinters]
+        default = ""
+        try:
+            default = str(PrinterSettings().PrinterName)
+        except Exception:
+            pass
+        return {"ok": True, "printers": printers, "default": default}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def call_tool(payload):
     tool = str(payload.get("tool") or "")
     args = payload.get("args") or {}
     if tool == "__read_file__":
         return _read_file_diag(args)
+    if tool == "__list_printers__":
+        return _list_printers_diag(args)
     registry = tool_registry()
     if tool not in registry:
         return {"ok": False, "error": f"未知工具 {tool!r}", "tools": sorted(registry)}
