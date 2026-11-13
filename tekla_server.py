@@ -62,7 +62,9 @@ import csv
 import datetime as _dt
 import functools
 import json
+import math
 import os
+import re
 import sys
 import logging
 import threading
@@ -176,7 +178,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.3.7"
+__version__ = "2.4.0"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1374,6 +1376,231 @@ def tekla_get_object_details(guids: str, uda_names: str = "",
                 "invalid_guids": invalid, "not_found_guids": not_found}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _contour_global_points(obj):
+    """ContourPlate / PolyBeam 的轮廓点(全局坐标)与倒角信息。非轮廓件返回 None。"""
+    contour = _safe(obj, "Contour")
+    if contour is None:
+        return None
+    pts = _safe(contour, "ContourPoints")
+    if pts is None:
+        return None
+    out = []
+    try:
+        for cp in pts:
+            row = {"x": float(cp.X), "y": float(cp.Y), "z": float(cp.Z)}
+            ch = _safe(cp, "Chamfer")
+            if ch is not None:
+                cx = float(_safe(ch, "X", 0) or 0)
+                cy = float(_safe(ch, "Y", 0) or 0)
+                ct = _safe(ch, "Type")
+                if cx or cy or (ct is not None and str(ct) not in ("0", "None", "NONE")):
+                    row["chamfer"] = {"type": str(ct), "x": cx, "y": cy}
+            out.append(row)
+    except Exception:
+        return None
+    return out or None
+
+
+def _plane_frame(points):
+    """由轮廓点建立板平面局部坐标系: origin/axisX/axisY/normal(全局)。
+
+    取第一个不共线的三点组定平面；全部共线返回 None。
+    """
+    if len(points) < 3:
+        return None
+    p0 = (points[0]["x"], points[0]["y"], points[0]["z"])
+    axis_x = None
+    for q in points[1:]:
+        v = (q["x"] - p0[0], q["y"] - p0[1], q["z"] - p0[2])
+        if _length(v) > 1e-6:
+            axis_x = _unit(v)
+            break
+    if axis_x is None:
+        return None
+    normal = None
+    for q in points[1:]:
+        v = (q["x"] - p0[0], q["y"] - p0[1], q["z"] - p0[2])
+        n = _cross(axis_x, v)
+        if _length(n) > 1e-6:
+            normal = _unit(n)
+            break
+    if normal is None:
+        return None
+    axis_y = _cross(normal, axis_x)
+    return {"origin": p0, "axis_x": axis_x, "axis_y": axis_y, "normal": normal}
+
+
+def _length(v):
+    return (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) ** 0.5
+
+
+def _project_2d(points, frame):
+    """全局点列 -> 板平面局部 2D 坐标(mm)，并返回最大离面偏差。"""
+    o, ax, ay, n = frame["origin"], frame["axis_x"], frame["axis_y"], frame["normal"]
+    out, dev = [], 0.0
+    for p in points:
+        v = (p["x"] - o[0], p["y"] - o[1], p["z"] - o[2])
+        out.append({"x": round(_dot(v, ax), 3), "y": round(_dot(v, ay), 3)})
+        dev = max(dev, abs(_dot(v, n)))
+    return out, round(dev, 3)
+
+
+def _plate_thickness(obj):
+    """从 PROFILE(如 PL6*60) 解析板厚；解析不出返回 None。"""
+    profile = _report_str(obj, "PROFILE") or ""
+    m = re.match(r"^\s*PL\s*([0-9]+(?:\.[0-9]+)?)", profile, re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+
+def _enum_member_name(value):
+    """pythonnet 枚举值 -> 成员名(兼容 str() 返回数字的情况)。"""
+    try:
+        s = str(value)
+        if s and not s.lstrip("-").isdigit():
+            return s
+    except Exception:
+        pass
+    try:
+        for name in _enum_names(type(value)):
+            if getattr(type(value), name) == value:
+                return name
+    except Exception:
+        pass
+    return str(value)
+
+
+def _convex_hull_2d(pts):
+    """单调链凸包(用于非轮廓切割体的包围盒投影近似)。"""
+    pts = sorted({(p["x"], p["y"]) for p in pts})
+    if len(pts) <= 2:
+        return [{"x": x, "y": y} for x, y in pts]
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return [{"x": x, "y": y} for x, y in (lower[:-1] + upper[:-1])]
+
+
+def _boolean_rows(obj, frame):
+    """读取零件上的布尔切割/添加，切割体轮廓投影到父件板平面(2D)。"""
+    rows = []
+    try:
+        en = obj.GetBooleans()
+    except Exception:
+        return rows
+    while en.MoveNext() and len(rows) < 50:
+        b = en.Current
+        row = {"type": _enum_member_name(_safe(b, "Type"))}
+        op = _safe(b, "OperativePart")
+        if op is None:
+            row["error"] = "无法读取 OperativePart"
+            rows.append(row)
+            continue
+        row["op_kind"] = type(op).__name__
+        row["op_profile"] = _report_str(op, "PROFILE") or ""
+        row["op_guid"] = _guid_of(op)
+        op_pts = _contour_global_points(op)
+        if op_pts:
+            local, dev = _project_2d(op_pts, frame)
+            row["contour"] = local
+            row["op_plane_dev"] = dev
+            # 切割体自身平面与父件板平面的夹角: 垂直切割时投影精确
+            op_frame = _plane_frame(op_pts)
+            if op_frame is not None:
+                d = abs(_dot(op_frame["normal"], frame["normal"]))
+                row["perp"] = d > 0.999
+                row["angle_deg"] = round(math.degrees(math.acos(min(1.0, d))), 2)
+            row["approx"] = not row.get("perp", False)
+        else:
+            # 非轮廓切割体(如梁/实体): 用实体包围盒八角投影的凸包近似(偏保守)
+            try:
+                solid = op.GetSolid()
+                mn, mx = solid.MinimumPoint, solid.MaximumPoint
+                corners = [{"x": x, "y": y, "z": z}
+                           for x in (mn.X, mx.X) for y in (mn.Y, mx.Y)
+                           for z in (mn.Z, mx.Z)]
+                local, _dev = _project_2d(corners, frame)
+                row["contour"] = _convex_hull_2d(local)
+                row["approx"] = True
+                row["approx_reason"] = "切割体无轮廓, 用实体包围盒投影近似"
+            except Exception as exc:
+                row["error"] = f"切割体几何读取失败: {type(exc).__name__}: {exc}"
+        rows.append(row)
+    return rows
+
+
+@server.tool()
+@_synchronized
+def tekla_get_contours(guids: str = "", scope: str = "selected",
+                       include_booleans: bool = True, max_parts: int = 100) -> dict:
+    """读取板件真实轮廓(板平面 2D 坐标 mm)与布尔切割, 供异形排版/轮廓导出。
+
+    guids 逗号分隔(优先); 为空时按 scope=selected/class/all 取对象。
+    每个零件返回: BOM 行 + contour(轮廓点 2D) + thickness + booleans(CUT/ADD,
+    切割体轮廓已投影到同一板平面) + frame(局部坐标系, 全局坐标)。
+    净多边形由调用方按 contour − CUT + ADD 计算(如 shapely)。
+    矩形梁板(无 Contour)返回 contour=null, 调用方按包围盒矩形处理。
+    """
+    try:
+        _require_api()
+        if _split_names(guids):
+            objects, invalid, not_found = _objects_from_guids(guids)
+        else:
+            objects, invalid, not_found = _targets(scope), [], []
+        objects = [o for o in objects if isinstance(o, Part)]
+        try:
+            cap = max(1, min(int(max_parts), 200))
+        except (TypeError, ValueError):
+            cap = 100
+        truncated = len(objects) > cap
+        objects = objects[:cap]
+        rows = []
+        for obj in objects:
+            row = _part_row(obj)
+            row["thickness"] = _plate_thickness(obj)
+            pts = _contour_global_points(obj)
+            if pts is None:
+                row["contour"] = None
+                row["note"] = "无轮廓(矩形梁板等), 按包围盒处理"
+                rows.append(row)
+                continue
+            frame = _plane_frame(pts)
+            if frame is None:
+                row["contour"] = None
+                row["error"] = "轮廓点不足或全部共线, 无法定平面"
+                rows.append(row)
+                continue
+            local, dev = _project_2d(pts, frame)
+            row["contour"] = local
+            row["plane_dev"] = dev
+            row["frame"] = {
+                "origin": _point_row_dict(frame["origin"]),
+                "axis_x": _point_row_dict(frame["axis_x"]),
+                "axis_y": _point_row_dict(frame["axis_y"]),
+                "normal": _point_row_dict(frame["normal"]),
+            }
+            if include_booleans:
+                row["booleans"] = _boolean_rows(obj, frame)
+            rows.append(row)
+        return {"count": len(rows), "parts": rows, "truncated": truncated,
+                "invalid_guids": invalid, "not_found_guids": not_found}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _point_row_dict(v):
+    return {"x": round(v[0], 3), "y": round(v[1], 3), "z": round(v[2], 3)}
 
 
 @server.tool()
