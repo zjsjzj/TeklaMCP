@@ -59,28 +59,35 @@ if (-not (Test-Path $bridge)) {
     throw "Bridge script not found: $bridge"
 }
 
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-    Where-Object { $_.CommandLine -like "*tekla_remote_bridge.py*" } |
+Get-CimInstance Win32_Process |
+    Where-Object { $_.CommandLine -like "*tekla_remote_bridge.py*" -or $_.CommandLine -like "*bridge-watchdog.vbs*" } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
-    Where-Object { $_.CommandLine -like "*tekla_remote_bridge.py*" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Milliseconds 800
 
-$vbs = Join-Path $InstallDir "start-bridge.vbs"
+# Watchdog VBS: relaunch the hidden bridge whenever it exits (self-healing).
+# bWaitOnReturn=True blocks until pythonw exits; on crash it sleeps 3s and restarts.
+$vbs = Join-Path $InstallDir "bridge-watchdog.vbs"
 $vbsContent = @(
     'Set sh = CreateObject("WScript.Shell")',
-    ('sh.Run """{0}"" ""{1}"" --token {2} --relay {3}", 0, False' -f $pythonw, $bridge, $Token, $Relay)
+    'Do',
+    ('  sh.Run """{0}"" ""{1}"" --token {2} --relay {3}", 0, True' -f $pythonw, $bridge, $Token, $Relay),
+    '  WScript.Sleep 3000',
+    'Loop'
 )
 Set-Content -Path $vbs -Value $vbsContent -Encoding ASCII
 
+# Permanent autostart: watchdog runs at every logon and keeps the bridge alive.
 $startup = [Environment]::GetFolderPath("Startup")
 Copy-Item -Path $vbs -Destination (Join-Path $startup "TeklaMCPBridge.vbs") -Force
 
 Start-Process -FilePath "wscript.exe" -ArgumentList ('"{0}"' -f $vbs)
+Start-Sleep -Seconds 4
+$alive = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*tekla_remote_bridge.py*" })
 
 Write-Host ""
 Write-Host "Installed: $($src.FullName)"
-Write-Host "Hidden launcher: $vbs"
-Write-Host "Autostart: $(Join-Path $startup 'TeklaMCPBridge.vbs')"
-Write-Host "Stop now: Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe'\" | Where-Object { $_.CommandLine -like '*tekla_remote_bridge.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+Write-Host "Watchdog (self-healing): $vbs"
+Write-Host "Autostart (every logon): $(Join-Path $startup 'TeklaMCPBridge.vbs')"
+Write-Host "Bridge processes alive: $($alive.Count)"
+Write-Host "Stop now: Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*tekla_remote_bridge.py*' -or $_.CommandLine -like '*bridge-watchdog.vbs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
 Write-Host "Remove autostart: Remove-Item \"$(Join-Path $startup 'TeklaMCPBridge.vbs')\""

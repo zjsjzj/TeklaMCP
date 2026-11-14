@@ -178,7 +178,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1528,14 +1528,31 @@ def _plane_cut_row(b, plane, frame, father_local, plane_err=None):
     kind = type(b).__name__
     origin, oerr = _bool_get(plane, "Origin")
     normal, nerr = _bool_get(plane, "Normal")
+    if normal is None:
+        # Tekla Geometry3d.Plane 用 Origin+AxisX+AxisY 表示, 法向 = AxisX × AxisY
+        ax, _axerr = _bool_get(plane, "AxisX")
+        ay, _ayerr = _bool_get(plane, "AxisY")
+        if ax is not None and ay is not None:
+            try:
+                axv = (float(ax.X), float(ax.Y), float(ax.Z))
+                ayv = (float(ay.X), float(ay.Y), float(ay.Z))
+                normal = (axv[1] * ayv[2] - axv[2] * ayv[1],
+                          axv[2] * ayv[0] - axv[0] * ayv[2],
+                          axv[0] * ayv[1] - axv[1] * ayv[0])
+                nerr = None
+            except Exception as exc:
+                nerr = f"AxisX×AxisY 失败: {type(exc).__name__}: {exc}"
     if origin is None or normal is None:
-        return {"type": "CUT", "op_kind": kind, "error": "Plane 缺 Origin/Normal",
+        return {"type": "CUT", "op_kind": kind, "error": "Plane 缺 Origin/法向",
                 "diag": {"plane_type": type(plane).__name__, "plane_err": plane_err,
                          "origin_err": oerr, "normal_err": nerr,
                          "plane_members": [m for m in dir(plane) if not m.startswith("_")][:60]}}
     try:
         o = {"x": float(origin.X), "y": float(origin.Y), "z": float(origin.Z)}
-        n = (float(normal.X), float(normal.Y), float(normal.Z))
+        if isinstance(normal, tuple):
+            n = normal
+        else:
+            n = (float(normal.X), float(normal.Y), float(normal.Z))
     except Exception as exc:
         return {"type": "CUT", "op_kind": kind, "error": f"Plane 坐标读取失败: {type(exc).__name__}: {exc}"}
     P, _dev = _project_2d([o], frame)
