@@ -178,7 +178,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.5.1"
+__version__ = "2.6.0"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1714,6 +1714,50 @@ def _boolean_rows(obj, frame, father_local=None):
     return rows
 
 
+def _beam_plate_rect(obj):
+    """非轮廓板(矩形梁板, 如 PL 剖面的 Beam 柱脚板)由实体包围盒重建矩形轮廓+平面坐标系。
+
+    取包围盒最薄轴为板厚法向, 另两轴为板平面; 返回 (rect_4pts, frame, 厚度方向尺寸) 或 None。
+    这样梁板上的螺栓孔/布尔切割也能被读取并投影到板平面(否则梁板孔洞会被整体漏掉)。
+    """
+    box = _solid_bbox(obj)
+    if not box.get("min") or not box.get("max"):
+        return None
+    mn, mx = box["min"], box["max"]
+    coords = ("x", "y", "z")
+    ext = [mx[c] - mn[c] for c in coords]
+    k = min(range(3), key=lambda i: ext[i])  # 最薄轴 = 板厚法向
+    if ext[k] <= 1e-6:
+        return None
+    i, j = [a for a in range(3) if a != k]
+
+    def e(idx):
+        v = [0.0, 0.0, 0.0]
+        v[idx] = 1.0
+        return tuple(v)
+
+    ax_i, ax_j, ax_k = e(i), e(j), e(k)
+    if _cross(ax_i, ax_j)[k] < 0:  # 保证右手系
+        i, j = j, i
+        ax_i, ax_j = ax_j, ax_i
+    frame = {"origin": (mn["x"], mn["y"], mn["z"]),
+             "axis_x": ax_i, "axis_y": ax_j, "normal": ax_k}
+    corners = []
+    for vx in (mn["x"], mx["x"]):
+        for vy in (mn["y"], mx["y"]):
+            for vz in (mn["z"], mx["z"]):
+                corners.append({"x": vx, "y": vy, "z": vz})
+    local, _dev = _project_2d(corners, frame)
+    xs = [p["x"] for p in local]
+    ys = [p["y"] for p in local]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    if x1 - x0 <= 1e-6 or y1 - y0 <= 1e-6:
+        return None
+    rect = [{"x": x0, "y": y0}, {"x": x1, "y": y0},
+            {"x": x1, "y": y1}, {"x": x0, "y": y1}]
+    return rect, frame, ext[k]
+
+
 @server.tool()
 @_synchronized
 def tekla_get_contours(guids: str = "", scope: str = "selected",
@@ -1748,6 +1792,25 @@ def tekla_get_contours(guids: str = "", scope: str = "selected",
             row["thickness"] = _plate_thickness(obj)
             pts = _contour_global_points(obj)
             if pts is None:
+                # 矩形梁板(如 PL 剖面 Beam 柱脚板): 由实体包围盒重建矩形轮廓, 仍读取孔/布尔,
+                # 否则梁板上的螺栓孔会被整体漏掉。
+                rect = _beam_plate_rect(obj) if row.get("thickness") else None
+                if rect is not None:
+                    local, frame, _textent = rect
+                    row["contour"] = local
+                    row["contour_source"] = "solid_bbox"
+                    row["plane_dev"] = 0.0
+                    row["frame"] = {
+                        "origin": _point_row_dict(frame["origin"]),
+                        "axis_x": _point_row_dict(frame["axis_x"]),
+                        "axis_y": _point_row_dict(frame["axis_y"]),
+                        "normal": _point_row_dict(frame["normal"]),
+                    }
+                    if include_booleans:
+                        row["booleans"] = _boolean_rows(obj, frame, local)
+                        row["holes"] = _hole_rows(obj, frame)
+                    rows.append(row)
+                    continue
                 row["contour"] = None
                 row["note"] = "无轮廓(矩形梁板等), 按包围盒处理"
                 rows.append(row)
