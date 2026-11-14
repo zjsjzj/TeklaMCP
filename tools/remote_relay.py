@@ -23,33 +23,58 @@ from urllib.parse import parse_qs, urlparse
 
 
 class Relay:
-    def __init__(self, token, timeout=180):
+    def __init__(self, token, timeout=180, stale=90):
         self.token = token
         self.timeout = timeout
+        self.stale = stale  # 任务被取走后超过该秒数仍无结果 → 视为孤儿任务, 可被抢占
         self.cond = threading.Condition()
         self.job = None
         self.results = {}
         self.bridge_seen = 0.0
 
+    def _job_stale(self):
+        """当前任务是否已卡死(被取走但长时间无结果, 或提交后长时间无人取)。"""
+        if self.job is None:
+            return False
+        now = time.time()
+        taken_at = self.job.get("taken_at")
+        if taken_at is not None:
+            return (now - taken_at) > self.stale
+        return (now - self.job.get("submitted", now)) > self.stale
+
+    def reset(self):
+        """强制清空任务槽(桥接重启/人工一键复位时调用), 唤醒等待者。"""
+        with self.cond:
+            self.job = None
+            self.cond.notify_all()
+
     def submit(self, payload):
         with self.cond:
             if self.job is not None:
-                raise RuntimeError("已有任务在执行，请串行调用")
+                if self._job_stale():
+                    # 孤儿任务(桥接崩溃/重启遗留): 抢占清空, 避免长时间"代理正忙"
+                    self.job = None
+                    self.cond.notify_all()
+                else:
+                    raise RuntimeError("已有任务在执行，请串行调用")
             job = {"id": uuid.uuid4().hex,
                    "tool": str(payload.get("tool") or ""),
-                   "args": payload.get("args") or {}}
+                   "args": payload.get("args") or {},
+                   "submitted": time.time()}
             self.job = job
             self.cond.notify_all()
             deadline = time.time() + self.timeout
             while job["id"] not in self.results:
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    self.job = None
+                    if self.job is not None and self.job.get("id") == job["id"]:
+                        self.job = None
                     raise TimeoutError(
                         "Windows 桥未在时限内返回；确认 bridge 正在运行且 --relay 指向本机")
                 self.cond.wait(remaining)
             result = self.results.pop(job["id"])
-            self.job = None
+            if self.job is not None and self.job.get("id") == job["id"]:
+                self.job = None
             return result
 
     def take_job(self, wait):
@@ -59,6 +84,7 @@ class Relay:
             while True:
                 if self.job is not None and not self.job.get("taken"):
                     self.job["taken"] = True
+                    self.job["taken_at"] = time.time()
                     return self.job
                 remaining = deadline - time.time()
                 if remaining <= 0:
@@ -98,8 +124,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/health":
             age = time.time() - self.server.relay.bridge_seen
+            relay = self.server.relay
+            job = relay.job
             self._send(200, {"ok": True,
-                             "bridge_seen_seconds_ago": round(age, 1) if age < 1e6 else None})
+                             "bridge_seen_seconds_ago": round(age, 1) if age < 1e6 else None,
+                             "job_active": job is not None,
+                             "job_tool": (job or {}).get("tool"),
+                             "job_stale": relay._job_stale()})
             return
         if path == "/ping":
             self._send(200, {"ok": True})
@@ -122,7 +153,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/call", "/result"):
+        if path not in ("/call", "/result", "/reset"):
             self._send(404, {"ok": False, "error": "not found"})
             return
         if not self._token_ok():
@@ -130,6 +161,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/call" and not self._local_only():
             self._send(403, {"ok": False, "error": "call 只允许本机提交"})
+            return
+        if path == "/reset":
+            # 一键复位: 清空卡死的任务槽(桥接启动时自动调用, 也可人工 curl)
+            self.server.relay.reset()
+            self._send(200, {"ok": True, "reset": True})
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -165,10 +201,12 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--stale", type=float, default=90,
+                        help="任务被取走后超过该秒数无结果则视为孤儿并可抢占(默认90)")
     args = parser.parse_args()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    httpd.relay = Relay(args.token, args.timeout)
+    httpd.relay = Relay(args.token, args.timeout, args.stale)
     print(f"relay listening on http://{args.host}:{args.port}", flush=True)
     httpd.serve_forever()
 

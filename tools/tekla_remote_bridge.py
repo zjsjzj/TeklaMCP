@@ -191,6 +191,16 @@ def _lan_addresses():
 def relay_loop(relay, token, poll_seconds=35):
     """主动向中继轮询任务，避免 Windows 入站防火墙。"""
     base = relay.rstrip("/")
+    # 启动时复位中继任务槽: 清掉上一代桥接崩溃/重启遗留的孤儿任务,
+    # 避免代理侧长时间"已有任务在执行"。旧中继无 /reset 时返回 404, 忽略即可。
+    try:
+        request = urllib.request.Request(
+            f"{base}/reset?token={token}", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json; charset=utf-8"})
+        urllib.request.urlopen(request, timeout=10).read()
+        print("relay job slot reset on startup", flush=True)
+    except Exception as exc:  # noqa: BLE001 - 复位失败不影响轮询
+        sys.stderr.write(f"relay reset skipped: {exc}\n")
     print(f"Tekla remote bridge polling relay {base} "
           f"({len(tool_registry())} tools)", flush=True)
     while True:
