@@ -178,7 +178,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.4.1"
+__version__ = "2.5.0"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1512,7 +1512,97 @@ def _bool_get(b, name):
     return None, err1
 
 
-def _boolean_rows(obj, frame):
+def _fnum(v):
+    try:
+        return float(v) if v is not None else None
+    except Exception:
+        return None
+
+
+def _plane_cut_row(b, plane, frame, father_local, plane_err=None):
+    """CutPlane/Fitting: 用 Plane(Origin+Normal) 表示半平面裁剪。
+
+    投影到父件板平面得切割线(点 P + 法向 N)。removed 法向取背离父件轮廓质心一侧
+    (角部切割时质心必在保留侧)。切割面平行板面(厚度方向)时不影响轮廓, 标记 skip。
+    """
+    kind = type(b).__name__
+    origin, oerr = _bool_get(plane, "Origin")
+    normal, nerr = _bool_get(plane, "Normal")
+    if origin is None or normal is None:
+        return {"type": "CUT", "op_kind": kind, "error": "Plane 缺 Origin/Normal",
+                "diag": {"plane_type": type(plane).__name__, "plane_err": plane_err,
+                         "origin_err": oerr, "normal_err": nerr,
+                         "plane_members": [m for m in dir(plane) if not m.startswith("_")][:60]}}
+    try:
+        o = {"x": float(origin.X), "y": float(origin.Y), "z": float(origin.Z)}
+        n = (float(normal.X), float(normal.Y), float(normal.Z))
+    except Exception as exc:
+        return {"type": "CUT", "op_kind": kind, "error": f"Plane 坐标读取失败: {type(exc).__name__}: {exc}"}
+    P, _dev = _project_2d([o], frame)
+    P = P[0]
+    nx, ny = _dot(n, frame["axis_x"]), _dot(n, frame["axis_y"])
+    nl = (nx * nx + ny * ny) ** 0.5
+    if nl < 1e-6:
+        return {"type": "CUT", "op_kind": kind, "skip": True,
+                "note": "切割面平行板面(厚度方向), 不影响轮廓"}
+    nx, ny = nx / nl, ny / nl
+    if father_local:
+        cx = sum(p["x"] for p in father_local) / len(father_local)
+        cy = sum(p["y"] for p in father_local) / len(father_local)
+        if (cx - P["x"]) * nx + (cy - P["y"]) * ny > 0:
+            nx, ny = -nx, -ny  # 法向原本指向质心(保留侧) -> 翻转为移除侧
+    return {"type": "CUT", "op_kind": kind, "approx": False,
+            "halfplane": {"point": {"x": round(P["x"], 3), "y": round(P["y"], 3)},
+                          "normal": {"x": round(nx, 5), "y": round(ny, 5)}}}
+
+
+def _hole_rows(obj, frame):
+    """读取零件螺栓孔(GetBolts): 孔心投影到板平面, 孔径=BoltSize+Tolerance。
+
+    返回每孔 {center, diameter, bolt_size, tolerance, hole_type, shape, slotted_x/y, kind}。
+    开孔(圆孔/长圆孔)由调用方从净多边形中扣除。原始 bolt_size/tolerance 一并返回以便校验。
+    """
+    holes = []
+    try:
+        en = obj.GetBolts()
+    except Exception:
+        return holes
+    while en.MoveNext() and len(holes) < 400:
+        bg = en.Current
+        try:
+            bg.Select()
+        except Exception:
+            pass
+        size = _fnum(_safe(bg, "BoltSize"))
+        tol = _fnum(_safe(bg, "Tolerance"))
+        htype = _safe(bg, "HoleType")
+        shape = _safe(bg, "Shape")
+        sx = _fnum(_safe(bg, "SlottedHoleX"))
+        sy = _fnum(_safe(bg, "SlottedHoleY"))
+        if size is not None and tol is not None:
+            dia = round(size + tol, 3)
+        elif size is not None:
+            dia = round(size, 3)
+        else:
+            dia = None
+        positions = _safe(bg, "BoltPositions")
+        if positions is None:
+            continue
+        try:
+            for pos in positions:
+                p2, _dev = _project_2d(
+                    [{"x": float(pos.X), "y": float(pos.Y), "z": float(pos.Z)}], frame)
+                holes.append({"center": p2[0], "diameter": dia, "bolt_size": size,
+                              "tolerance": tol,
+                              "hole_type": _enum_member_name(htype) if htype is not None else None,
+                              "shape": _enum_member_name(shape) if shape is not None else None,
+                              "slotted_x": sx, "slotted_y": sy, "kind": type(bg).__name__})
+        except Exception:
+            continue
+    return holes
+
+
+def _boolean_rows(obj, frame, father_local=None):
     """读取零件上的布尔切割/添加，切割体轮廓投影到父件板平面(2D)。"""
     rows = []
     try:
@@ -1560,8 +1650,14 @@ def _boolean_rows(obj, frame):
             except Exception:
                 pass
         if op is None:
+            # 平面切割(CutPlane/Fitting): 无 OperativePart, 改用 Plane 半平面裁剪
+            plane, perr = _bool_get(b, "Plane")
+            if plane is not None:
+                rows.append(_plane_cut_row(b, plane, frame, father_local, perr))
+                continue
             row["error"] = "无法读取 OperativePart"
-            row["diag"] = {"select": sel_err, "op_err": operr, "bool_kind": type(b).__name__}
+            row["diag"] = {"select": sel_err, "op_err": operr, "bool_kind": type(b).__name__,
+                           "plane_err": perr}
             rows.append(row)
             continue
         try:
@@ -1605,12 +1701,15 @@ def _boolean_rows(obj, frame):
 @_synchronized
 def tekla_get_contours(guids: str = "", scope: str = "selected",
                        include_booleans: bool = True, max_parts: int = 100) -> dict:
-    """读取板件真实轮廓(板平面 2D 坐标 mm)与布尔切割, 供异形排版/轮廓导出。
+    """读取板件真实轮廓(板平面 2D 坐标 mm)、布尔切割与螺栓孔, 供异形排版/轮廓导出。
 
     guids 逗号分隔(优先); 为空时按 scope=selected/class/all 取对象。
-    每个零件返回: BOM 行 + contour(轮廓点 2D) + thickness + booleans(CUT/ADD,
-    切割体轮廓已投影到同一板平面) + frame(局部坐标系, 全局坐标)。
-    净多边形由调用方按 contour − CUT + ADD 计算(如 shapely)。
+    每个零件返回: BOM 行 + contour(轮廓点 2D) + thickness + frame(局部坐标系, 全局坐标)
+    + booleans + holes。
+    booleans: BooleanPart 切割体轮廓已投影到同一板平面(CUT/ADD); CutPlane/Fitting 以
+      halfplane{point,normal} 表示半平面裁剪(normal 指向移除侧)。
+    holes: 螺栓孔列表 {center, diameter(=BoltSize+Tolerance), shape, slotted_x/y, ...}。
+    净多边形由调用方按 contour − CUT(含 halfplane) − holes + ADD 计算(如 shapely)。
     矩形梁板(无 Contour)返回 contour=null, 调用方按包围盒矩形处理。
     """
     try:
@@ -1652,7 +1751,8 @@ def tekla_get_contours(guids: str = "", scope: str = "selected",
                 "normal": _point_row_dict(frame["normal"]),
             }
             if include_booleans:
-                row["booleans"] = _boolean_rows(obj, frame)
+                row["booleans"] = _boolean_rows(obj, frame, local)
+                row["holes"] = _hole_rows(obj, frame)
             rows.append(row)
         return {"count": len(rows), "parts": rows, "truncated": truncated,
                 "invalid_guids": invalid, "not_found_guids": not_found}
