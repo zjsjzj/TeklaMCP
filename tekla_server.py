@@ -178,7 +178,7 @@ try:  # mcp 1.x
 except ImportError:  # mcp 2.x
     from mcp.server.mcpserver import MCPServer as _Server
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 try:
     server = _Server("TeklaStructures", version=__version__)
 except TypeError:  # 老版本 MCP SDK 没有 version 参数
@@ -1492,6 +1492,26 @@ def _convex_hull_2d(pts):
     return [{"x": x, "y": y} for x, y in (lower[:-1] + upper[:-1])]
 
 
+def _bool_get(b, name):
+    """读取布尔件属性: 先属性后 get_ 方法; 返回 (value, err)。err 记录真实异常。"""
+    err1 = "null"
+    try:
+        v = getattr(b, name)
+        if v is not None:
+            return v, None
+    except Exception as exc:
+        err1 = f"{type(exc).__name__}: {exc}"
+    getter = getattr(b, "get_" + name, None)
+    if getter is not None:
+        try:
+            v = getter()
+            if v is not None:
+                return v, None
+        except Exception as exc:
+            return None, f"{err1} | get_{name}: {type(exc).__name__}: {exc}"
+    return None, err1
+
+
 def _boolean_rows(obj, frame):
     """读取零件上的布尔切割/添加，切割体轮廓投影到父件板平面(2D)。"""
     rows = []
@@ -1501,12 +1521,53 @@ def _boolean_rows(obj, frame):
         return rows
     while en.MoveNext() and len(rows) < 50:
         b = en.Current
-        row = {"type": _enum_member_name(_safe(b, "Type"))}
-        op = _safe(b, "OperativePart")
+        # 枚举器返回的布尔件常需 Select() 加载后才能读属性
+        sel_err = None
+        try:
+            if not b.Select():
+                sel_err = "Select()=False"
+        except Exception as exc:
+            sel_err = f"Select: {type(exc).__name__}: {exc}"
+        tval, terr = _bool_get(b, "Type")
+        row = {"type": _enum_member_name(tval) if tval is not None else "None"}
+        if terr:
+            row["type_err"] = terr
+        op, operr = _bool_get(b, "OperativePart")
+        if op is None:
+            # 兜底1: 按标识符重新选取布尔件再读
+            try:
+                ident = _safe(b, "Identifier")
+                if ident is not None:
+                    b2 = _model().SelectModelObject(ident)
+                    if b2 is not None:
+                        op, operr2 = _bool_get(b2, "OperativePart")
+                        if op is not None:
+                            operr = None
+                        else:
+                            operr = f"{operr} | reselect: {operr2}"
+            except Exception as exc:
+                operr = f"{operr} | reselect: {type(exc).__name__}: {exc}"
+        if op is None:
+            # 兜底2: 从布尔件子对象里找操作件(Part)
+            try:
+                cen = b.GetChildren()
+                while cen.MoveNext():
+                    ch = cen.Current
+                    if isinstance(ch, Part):
+                        op = ch
+                        operr = None
+                        break
+            except Exception:
+                pass
         if op is None:
             row["error"] = "无法读取 OperativePart"
+            row["diag"] = {"select": sel_err, "op_err": operr, "bool_kind": type(b).__name__}
             rows.append(row)
             continue
+        try:
+            op.Select()
+        except Exception:
+            pass
         row["op_kind"] = type(op).__name__
         row["op_profile"] = _report_str(op, "PROFILE") or ""
         row["op_guid"] = _guid_of(op)
